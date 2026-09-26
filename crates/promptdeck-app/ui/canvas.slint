@@ -1,13 +1,32 @@
+/* Hallmark · component: single-canvas · genre: modern-minimal
+ * theme: studied-DNA (BlockHelm Workbench, design/design.md locked)
+ * source: design/design.md semantic tokens via ui/theme.slint
+ * states: 模式切换器 default · hover · active · selected；Source 输入 default · focus
+ */
+
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Strings } from "strings.slint";
+import { MarkdownBlock, MarkdownView } from "markdown.slint";
 
 component SourceEditor inherits Rectangle {
     in-out property <string> text <=> input.text;
+    out property <length> max-scroll: max(0px, scroll.content-height - scroll.visible-height);
+    out property <float> scroll-fraction: root.max-scroll <= 0px
+        ? 0
+        : clamp(-scroll.content-y / root.max-scroll, 0, 1);
     callback edited();
 
     clip: true;
     background: transparent;
+
+    public function scroll-to-fraction(fraction: float) {
+        scroll.content-y = -fraction * root.max-scroll;
+    }
+
+    public function reset-scroll() {
+        scroll.content-y = 0px;
+    }
 
     scroll := ScrollView {
         width: 100%;
@@ -57,20 +76,20 @@ component SourceEditor inherits Rectangle {
 component ModeSegment inherits FocusScope {
     in property <string> label;
     in property <bool> selected: false;
-    in property <bool> available: true;
     callback clicked();
 
-    out property <bool> hovering: touch.has-hover;
     height: 28px;
-    focus-on-click: root.available;
-    focus-on-tab-navigation: root.available;
+    focus-on-click: true;
+    focus-on-tab-navigation: true;
     min-width: 64px;
 
     Rectangle {
         width: 100%;
         height: 100%;
         border-radius: Theme.radius-input;
-        background: root.selected ? Theme.card : (touch.has-hover && root.available ? Theme.control-hover : transparent);
+        background: root.selected
+            ? (touch.pressed ? Theme.control : Theme.card)
+            : (touch.pressed || touch.has-hover ? Theme.control-hover : transparent);
         animate background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
     }
 
@@ -80,12 +99,10 @@ component ModeSegment inherits FocusScope {
         vertical-alignment: center;
         font-size: Theme.text-sm;
         font-weight: root.selected ? 600 : 400;
-        color: root.selected ? Theme.ink : (root.available ? Theme.ink-2 : Theme.ink-muted);
-        opacity: root.available ? 1 : 0.6;
+        color: root.selected ? Theme.ink : Theme.ink-2;
     }
 
     touch := TouchArea {
-        enabled: root.available;
         mouse-cursor: pointer;
         clicked => {
             root.focus();
@@ -95,6 +112,9 @@ component ModeSegment inherits FocusScope {
 }
 
 component ModeSwitcher inherits Rectangle {
+    in property <bool> markdown-selected: false;
+    callback mode-selected(mode: int);
+
     height: 32px;
     border-radius: Theme.radius-card;
     background: Theme.control;
@@ -105,12 +125,14 @@ component ModeSwitcher inherits Rectangle {
 
         ModeSegment {
             label: Strings.mode-source;
-            selected: true;
+            selected: !root.markdown-selected;
+            clicked => { root.mode-selected(0); }
         }
 
         ModeSegment {
             label: Strings.mode-markdown;
-            available: false;
+            selected: root.markdown-selected;
+            clicked => { root.mode-selected(1); }
         }
     }
 }
@@ -119,14 +141,59 @@ export component Canvas inherits Rectangle {
     in-out property <string> title-text <=> title-input.text;
     in-out property <string> body-text <=> editor.text;
     in property <bool> has-selection: false;
+    in property <bool> markdown-mode: false;
+    in property <[MarkdownBlock]> markdown-blocks: [];
     in property <int> focus-request: 0;
     out property <bool> title-focused: title-input.has-focus;
     callback text-edited();
+    callback mode-selected(mode: int);
+
+    private property <float> pending-scroll-fraction: 0;
+    private property <bool> sync-pending: false;
 
     background: transparent;
 
     changed focus-request => {
-        editor.focus-editor();
+        scroll-sync.stop();
+        root.sync-pending = false;
+        root.pending-scroll-fraction = 0;
+        editor.reset-scroll();
+        markdown.reset-scroll();
+        if (!root.markdown-mode) {
+            editor.focus-editor();
+        }
+    }
+
+    changed markdown-mode => {
+        root.pending-scroll-fraction = root.markdown-mode ? editor.scroll-fraction : markdown.scroll-fraction;
+        root.sync-pending = true;
+        scroll-sync.start();
+        if (root.markdown-mode) {
+            mode-anchor.focus();
+        } else {
+            editor.focus-editor();
+        }
+    }
+
+    scroll-sync := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            scroll-sync.stop();
+            if (root.sync-pending) {
+                root.sync-pending = false;
+                if (root.markdown-mode) {
+                    markdown.scroll-to-fraction(root.pending-scroll-fraction);
+                } else {
+                    editor.scroll-to-fraction(root.pending-scroll-fraction);
+                }
+            }
+        }
+    }
+
+    mode-anchor := FocusScope {
+        width: 0;
+        height: 0;
     }
 
     VerticalLayout {
@@ -209,15 +276,32 @@ export component Canvas inherits Rectangle {
                 }
             }
 
-            editor := SourceEditor {
+            content-area := Rectangle {
                 vertical-stretch: 1;
-                edited => { root.text-edited(); }
+                min-height: 0px;
+
+                editor := SourceEditor {
+                    width: 100%;
+                    height: 100%;
+                    visible: !root.markdown-mode;
+                    edited => { root.text-edited(); }
+                }
+
+                markdown := MarkdownView {
+                    width: 100%;
+                    height: 100%;
+                    visible: root.markdown-mode;
+                    blocks: root.markdown-blocks;
+                }
             }
 
             HorizontalLayout {
                 spacing: 0;
 
-                ModeSwitcher { }
+                ModeSwitcher {
+                    markdown-selected: root.markdown-mode;
+                    mode-selected(mode) => { root.mode-selected(mode); }
+                }
 
                 Rectangle { horizontal-stretch: 1; }
             }

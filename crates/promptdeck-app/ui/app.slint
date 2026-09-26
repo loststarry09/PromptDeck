@@ -5,6 +5,7 @@ export { Strings }
 import { SideRail } from "shell.slint";
 import { LibraryPanel, PromptRow } from "library.slint";
 import { Canvas } from "canvas.slint";
+import { MarkdownBlock } from "markdown.slint";
 
 export component AppWindow inherits Window {
     title: Strings.app-title;
@@ -27,6 +28,8 @@ export component AppWindow inherits Window {
     in-out property <string> search-query: "";
     in-out property <string> search-empty-title: "";
     in-out property <bool> library-empty: false;
+    in-out property <bool> markdown-mode: false;
+    in-out property <[MarkdownBlock]> markdown-blocks: [];
     out property <bool> title-focused: canvas.title-focused;
 
     callback new-prompt();
@@ -35,11 +38,18 @@ export component AppWindow inherits Window {
     callback cycle-theme();
     callback toggle-rail();
     callback search-edited();
+    callback mode-selected(mode: int);
+    callback toggle-mode();
 
     global-keys := FocusScope {
         KeyBinding {
             keys: @keys(Control + N);
             activated => { root.new-prompt(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + M);
+            activated => { root.toggle-mode(); }
         }
 
         Rectangle {
@@ -86,10 +96,13 @@ export component AppWindow inherits Window {
                 width: parent.width - rail.width - panel-box.width;
                 height: 100%;
                 has-selection: root.selected-id != "";
+                markdown-mode: root.markdown-mode;
+                markdown-blocks: root.markdown-blocks;
                 title-text <=> root.title-text;
                 body-text <=> root.body-text;
                 focus-request: root.editor-focus-request;
                 text-edited => { root.text-edited(); }
+                mode-selected(mode) => { root.mode-selected(mode); }
             }
         }
     }

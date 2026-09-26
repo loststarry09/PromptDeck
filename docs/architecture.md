@@ -19,6 +19,7 @@ crates/promptdeck-app    # Slint UI 与装配层；二进制名 promptdeck
 | `storage` | 连接、PRAGMA、迁移、仓储（items/tags/variables/versions/settings） | 扩展 |
 | `model` | 领域结构：`Item`、`ItemKind`、`Tag`、`VariableDef`、`Revision` | 新增 |
 | `variables` | 从 Markdown 解析变量定义；最终文本替换 | 新增 |
+| `markdown` | Markdown 块级解析（标题/段落/列表/引用/代码/分隔线），无 Slint | 新增 |
 | `search` | FTS5 查询与短查询兜底 | 新增 |
 | `clock` / `id` | 时间与 ID 提供者（可注入，保证测试确定性） | 新增 |
 | `error` | 领域错误（thiserror） | 新增 |
@@ -30,9 +31,10 @@ crates/promptdeck-app    # Slint UI 与装配层；二进制名 promptdeck
 | 模块 | 职责 |
 |---|---|
 | `main` | 装配根：解析数据目录、打开并迁移数据库、构造控制器、运行窗口 |
-| `controller` | 把 core 操作映射为 Slint 属性/回调；持有列表模型与选中状态 |
+| `controller` | 把 core 操作映射为 Slint 属性/回调；持有列表模型、选中状态与按条目的画布模式 |
+| `markdown` | 把 core 的 Markdown 块映射为 Slint 块模型；行内用 `StyledText`，不支持语法降级纯文本 |
 | `strings` | 中文文案集中管理，为 i18n 留位 |
-| `ui/*.slint` | `app.slint`（窗口）、`theme.slint`（tokens）、`shell/library/canvas/palette` |
+| `ui/*.slint` | `app.slint`（窗口）、`theme.slint`（tokens）、`shell/library/canvas/markdown` |
 
 ## 数据流与线程模型
 

@@ -1,6 +1,7 @@
 pub mod clock;
 pub mod error;
 pub mod id;
+pub mod markdown;
 pub mod model;
 pub mod paths;
 pub mod search;

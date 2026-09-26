@@ -1,0 +1,167 @@
+/* Hallmark · component: markdown-view · genre: modern-minimal
+ * theme: studied-DNA (BlockHelm Workbench, design/design.md locked)
+ * source: design/design.md semantic tokens via ui/theme.slint
+ * states: read-only 渲染面（无交互态）；空文档渲染为空；超长/不支持语法在 app 层降级
+ */
+
+import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+
+export enum MarkdownBlockKind {
+    paragraph,
+    heading,
+    list-item,
+    code,
+    quote,
+    rule,
+}
+
+export struct MarkdownBlock {
+    kind: MarkdownBlockKind,
+    level: int,
+    indent: int,
+    marker: string,
+    text: styled-text,
+}
+
+component BlockView inherits Rectangle {
+    in property <MarkdownBlock> block;
+
+    VerticalLayout {
+        padding-top: block.kind == MarkdownBlockKind.heading
+            ? (block.level == 1 ? Theme.space-md : block.level == 2 ? Theme.space-sm : Theme.space-xs)
+            : block.kind == MarkdownBlockKind.rule
+                ? Theme.space-xs
+                : Theme.space-3xs;
+        padding-bottom: block.kind == MarkdownBlockKind.heading
+            ? Theme.space-3xs
+            : block.kind == MarkdownBlockKind.rule
+                ? Theme.space-xs
+                : Theme.space-3xs;
+
+        if block.kind == MarkdownBlockKind.heading : StyledText {
+            text: block.text;
+            default-font-family: Theme.font-body;
+            default-font-size: block.level == 1
+                ? Theme.text-lg
+                : block.level == 2
+                    ? Theme.text-md
+                    : Theme.text-base;
+            default-color: Theme.ink;
+            link-color: Theme.accent;
+        }
+
+        if block.kind == MarkdownBlockKind.paragraph : StyledText {
+            text: block.text;
+            default-font-family: Theme.font-body;
+            default-font-size: Theme.text-base;
+            default-color: Theme.ink;
+            link-color: Theme.accent;
+        }
+
+        if block.kind == MarkdownBlockKind.list-item : HorizontalLayout {
+            padding-left: block.indent * Theme.space-sm;
+            spacing: Theme.space-2xs;
+
+            Text {
+                width: 20px;
+                text: block.marker;
+                horizontal-alignment: right;
+                vertical-alignment: top;
+                font-family: Theme.font-body;
+                font-size: Theme.text-base;
+                color: Theme.ink-muted;
+            }
+
+            StyledText {
+                horizontal-stretch: 1;
+                text: block.text;
+                default-font-family: Theme.font-body;
+                default-font-size: Theme.text-base;
+                default-color: Theme.ink;
+                link-color: Theme.accent;
+            }
+        }
+
+        if block.kind == MarkdownBlockKind.quote : HorizontalLayout {
+            spacing: Theme.space-xs;
+
+            Rectangle {
+                width: 3px;
+                vertical-stretch: 1;
+                border-radius: 2px;
+                background: Theme.rule-strong;
+            }
+
+            StyledText {
+                horizontal-stretch: 1;
+                text: block.text;
+                default-font-family: Theme.font-body;
+                default-font-size: Theme.text-base;
+                default-color: Theme.ink-2;
+                link-color: Theme.accent;
+            }
+        }
+
+        if block.kind == MarkdownBlockKind.code : Rectangle {
+            background: Theme.control;
+            border-radius: Theme.radius-input;
+            clip: true;
+
+            VerticalLayout {
+                width: 100%;
+                padding: Theme.space-xs;
+
+                StyledText {
+                    text: block.text;
+                    default-font-family: Theme.font-mono;
+                    default-font-size: Theme.text-sm;
+                    default-color: Theme.ink;
+                }
+            }
+        }
+
+        if block.kind == MarkdownBlockKind.rule : Rectangle {
+            height: 1px;
+            background: Theme.rule-strong;
+        }
+    }
+}
+
+export component MarkdownView inherits Rectangle {
+    in property <[MarkdownBlock]> blocks: [];
+
+    out property <length> max-scroll: max(0px, scroll.content-height - scroll.visible-height);
+    out property <float> scroll-fraction: root.max-scroll <= 0px
+        ? 0
+        : clamp(-scroll.content-y / root.max-scroll, 0, 1);
+
+    clip: true;
+    background: transparent;
+
+    public function scroll-to-fraction(fraction: float) {
+        scroll.content-y = -fraction * root.max-scroll;
+    }
+
+    public function reset-scroll() {
+        scroll.content-y = 0px;
+    }
+
+    scroll := ScrollView {
+        width: 100%;
+        height: 100%;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+        content-width: self.visible-width;
+        content-height: max(self.visible-height, page.preferred-height);
+
+        page := VerticalLayout {
+            width: parent.width;
+            spacing: 0;
+
+            for block in root.blocks : BlockView {
+                block: block;
+            }
+        }
+    }
+}

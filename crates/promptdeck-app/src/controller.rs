@@ -1,4 +1,5 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -7,11 +8,30 @@ use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel, Weak};
 use promptdeck_core::error::Result as CoreResult;
 use promptdeck_core::storage::library::{Library, SETTING_RAIL_EXPANDED, SETTING_THEME};
 
+use crate::markdown;
 use crate::strings;
 use crate::theme::{self, ThemeMode};
-use crate::{AppWindow, PromptRow};
+use crate::{AppWindow, MarkdownBlock, PromptRow};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
+
+/// 画布模式。Markdown 模式只读渲染；Source 模式是唯一可编辑面（ADR-0003）。
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum ViewMode {
+    #[default]
+    Source,
+    Markdown,
+}
+
+impl ViewMode {
+    fn from_ui(mode: i32) -> Self {
+        if mode == 0 {
+            Self::Source
+        } else {
+            Self::Markdown
+        }
+    }
+}
 
 pub struct Controller {
     library: Library,
@@ -20,6 +40,7 @@ pub struct Controller {
     save_timer: Timer,
     dirty: Cell<bool>,
     active_id: RefCell<Option<String>>,
+    modes: RefCell<HashMap<String, ViewMode>>,
     theme_mode: Cell<ThemeMode>,
     rail_expanded: Cell<bool>,
 }
@@ -42,6 +63,7 @@ impl Controller {
             save_timer: Timer::default(),
             dirty: Cell::new(false),
             active_id: RefCell::new(None),
+            modes: RefCell::new(HashMap::new()),
             theme_mode: Cell::new(theme_mode),
             rail_expanded: Cell::new(rail_expanded),
         });
@@ -82,6 +104,14 @@ impl Controller {
             let controller = controller.clone();
             ui.on_search_edited(move || controller.search_edited());
         }
+        {
+            let controller = controller.clone();
+            ui.on_mode_selected(move |mode| controller.select_mode(mode));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_toggle_mode(move || controller.toggle_mode());
+        }
 
         controller.refresh_items();
         controller.restore_selection();
@@ -111,9 +141,10 @@ impl Controller {
                 };
                 *self.active_id.borrow_mut() = Some(item.id.clone());
                 let _ = self.library.set_selected_prompt(Some(&item.id));
-                ui.set_selected_id(item.id.into());
+                ui.set_selected_id(item.id.clone().into());
                 ui.set_title_text(item.title.into());
                 ui.set_body_text(item.body_md.into());
+                self.apply_mode(self.mode_for(&item.id), &ui);
                 ui.set_editor_focus_request(ui.get_editor_focus_request() + 1);
             }
             None => {
@@ -121,8 +152,56 @@ impl Controller {
                 ui.set_selected_id(String::new().into());
                 ui.set_title_text(String::new().into());
                 ui.set_body_text(String::new().into());
+                ui.set_markdown_mode(false);
+                self.clear_markdown_blocks(&ui);
             }
         }
+    }
+
+    /// 切换当前条目的画布模式；模式按条目在同一会话内保持（不落库）。
+    pub fn select_mode(&self, mode: i32) {
+        self.store_mode(ViewMode::from_ui(mode));
+    }
+
+    pub fn toggle_mode(&self) {
+        let Some(id) = self.active_id.borrow().clone() else {
+            return;
+        };
+        let next = match self.mode_for(&id) {
+            ViewMode::Source => ViewMode::Markdown,
+            ViewMode::Markdown => ViewMode::Source,
+        };
+        self.store_mode(next);
+    }
+
+    fn store_mode(&self, mode: ViewMode) {
+        let Some(id) = self.active_id.borrow().clone() else {
+            return;
+        };
+        self.modes.borrow_mut().insert(id, mode);
+        if let Some(ui) = self.ui.upgrade() {
+            self.apply_mode(mode, &ui);
+        }
+    }
+
+    fn mode_for(&self, id: &str) -> ViewMode {
+        self.modes.borrow().get(id).copied().unwrap_or_default()
+    }
+
+    fn apply_mode(&self, mode: ViewMode, ui: &AppWindow) {
+        ui.set_markdown_mode(mode == ViewMode::Markdown);
+        if mode == ViewMode::Markdown {
+            self.render_markdown(ui);
+        }
+    }
+
+    fn render_markdown(&self, ui: &AppWindow) {
+        let blocks = markdown::to_ui_blocks(&ui.get_body_text());
+        ui.set_markdown_blocks(ModelRc::from(Rc::new(VecModel::from(blocks))));
+    }
+
+    fn clear_markdown_blocks(&self, ui: &AppWindow) {
+        ui.set_markdown_blocks(ModelRc::from(Rc::new(VecModel::<MarkdownBlock>::default())));
     }
 
     pub fn mark_dirty(&self) {
