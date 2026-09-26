@@ -7,6 +7,7 @@ use crate::clock::{Clock, SystemClock};
 use crate::error::{Error, Result};
 use crate::id::{IdSource, UuidV7Ids};
 use crate::model::{Item, ItemKind, ItemSummary, Revision, content_hash, derive_title};
+use crate::search::{self, QueryPlan};
 
 pub const REVISION_WINDOW_MS: i64 = 10_000;
 pub const SETTING_THEME: &str = "theme";
@@ -14,6 +15,8 @@ pub const SETTING_SELECTED_PROMPT: &str = "library.selected_prompt";
 pub const SETTING_RAIL_EXPANDED: &str = "rail.expanded";
 
 const ITEM_COLUMNS: &str = "id, kind, title, body_md, pinned, created_at, updated_at, deleted_at";
+const SUMMARY_COLUMNS: &str = "i.id, i.kind, i.title, i.pinned, i.created_at, i.updated_at";
+const SUMMARY_ORDER: &str = "ORDER BY i.updated_at DESC, i.created_at DESC, i.id DESC";
 
 pub struct Library {
     conn: Connection,
@@ -53,6 +56,7 @@ impl Library {
         ids: impl IdSource + 'static,
     ) -> Result<Self> {
         crate::storage::migrate(&conn)?;
+        ensure_fts_index(&conn)?;
         Ok(Self {
             conn,
             clock: Box::new(clock),
@@ -77,7 +81,8 @@ impl Library {
             deleted_at: None,
         };
 
-        self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        transaction.execute(
             "INSERT INTO items (id, kind, title, body_md, pinned, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
@@ -90,6 +95,8 @@ impl Library {
                 item.updated_at,
             ],
         )?;
+        sync_fts(&transaction, &item.id, &item.title, &item.body_md)?;
+        transaction.commit()?;
 
         Ok(item)
     }
@@ -115,6 +122,7 @@ impl Library {
             "UPDATE items SET title = ?1, body_md = ?2, updated_at = ?3 WHERE id = ?4",
             params![title, body_md, now, id],
         )?;
+        sync_fts(&transaction, id, &title, body_md)?;
 
         let latest: Option<(String, i64)> = transaction
             .query_row(
@@ -150,53 +158,57 @@ impl Library {
     }
 
     pub fn list_prompts(&self) -> Result<Vec<ItemSummary>> {
-        let mut statement = self.conn.prepare(
-            "SELECT id, kind, title, pinned, created_at, updated_at FROM items
-             WHERE kind = 'prompt' AND deleted_at IS NULL
-             ORDER BY updated_at DESC, created_at DESC, id DESC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        })?;
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {SUMMARY_COLUMNS} FROM items i
+             WHERE i.kind = 'prompt' AND i.deleted_at IS NULL
+             {SUMMARY_ORDER}"
+        ))?;
+        to_summaries(statement.query_map([], summary_tuple)?)
+    }
 
-        let mut summaries = Vec::new();
-        for row in rows {
-            let (id, kind, title, pinned, created_at, updated_at) = row?;
-            summaries.push(ItemSummary {
-                id,
-                kind: ItemKind::from_str(&kind)?,
-                title,
-                pinned,
-                created_at,
-                updated_at,
-            });
+    pub fn search_prompts(&self, query: &str) -> Result<Vec<ItemSummary>> {
+        match search::plan(query) {
+            QueryPlan::All => self.list_prompts(),
+            QueryPlan::Trigram(expression) => {
+                let mut statement = self.conn.prepare(&format!(
+                    "SELECT {SUMMARY_COLUMNS} FROM items_fts JOIN items i ON i.id = items_fts.item_id
+                     WHERE items_fts MATCH ?1 AND i.kind = 'prompt' AND i.deleted_at IS NULL
+                     {SUMMARY_ORDER}"
+                ))?;
+                to_summaries(statement.query_map([expression], summary_tuple)?)
+            }
+            QueryPlan::Like(pattern) => {
+                // Keep the LIKE columns in sync with the indexed columns above.
+                let mut statement = self.conn.prepare(&format!(
+                    "SELECT {SUMMARY_COLUMNS} FROM items i
+                     WHERE i.kind = 'prompt' AND i.deleted_at IS NULL
+                       AND (i.title LIKE ?1 ESCAPE '\\' OR i.body_md LIKE ?1 ESCAPE '\\')
+                     {SUMMARY_ORDER}"
+                ))?;
+                to_summaries(statement.query_map([pattern], summary_tuple)?)
+            }
         }
-        Ok(summaries)
     }
 
     pub fn soft_delete(&self, id: &str) -> Result<()> {
         let now = self.clock.now_ms();
-        let changed = self.conn.execute(
+        let transaction = self.conn.unchecked_transaction()?;
+        let changed = transaction.execute(
             "UPDATE items SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             params![now, id],
         )?;
 
         if changed == 0 {
-            let exists: Option<i64> = self
-                .conn
+            let exists: Option<i64> = transaction
                 .query_row("SELECT 1 FROM items WHERE id = ?1", [id], |row| row.get(0))
                 .optional()?;
             if exists.is_none() {
                 return Err(Error::ItemNotFound(id.to_string()));
             }
         }
+
+        remove_fts(&transaction, id)?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -303,6 +315,90 @@ fn load_item(conn: &Connection, id: &str) -> Result<Option<Item>> {
         })
     })
     .transpose()
+}
+
+type SummaryTuple = (String, String, String, bool, i64, i64);
+
+fn summary_tuple(row: &rusqlite::Row<'_>) -> rusqlite::Result<SummaryTuple> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+    ))
+}
+
+fn to_summaries(
+    rows: impl Iterator<Item = rusqlite::Result<SummaryTuple>>,
+) -> Result<Vec<ItemSummary>> {
+    let mut summaries = Vec::new();
+    for row in rows {
+        let (id, kind, title, pinned, created_at, updated_at) = row?;
+        summaries.push(ItemSummary {
+            id,
+            kind: ItemKind::from_str(&kind)?,
+            title,
+            pinned,
+            created_at,
+            updated_at,
+        });
+    }
+    Ok(summaries)
+}
+
+fn item_rowid(conn: &Connection, id: &str) -> Result<Option<i64>> {
+    conn.query_row("SELECT rowid FROM items WHERE id = ?1", [id], |row| {
+        row.get(0)
+    })
+    .optional()
+    .map_err(Error::from)
+}
+
+/// Re-indexes an item's `items_fts` row from the content just written, keyed
+/// by the item's implicit rowid. Callers pass the fresh content so the index
+/// can never lag the row it describes.
+fn sync_fts(conn: &Connection, id: &str, title: &str, body_md: &str) -> Result<()> {
+    remove_fts(conn, id)?;
+    let Some(rowid) = item_rowid(conn, id)? else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT INTO items_fts (rowid, title, body_md, item_id) VALUES (?1, ?2, ?3, ?4)",
+        params![rowid, title, body_md, id],
+    )?;
+    Ok(())
+}
+
+fn remove_fts(conn: &Connection, id: &str) -> Result<()> {
+    if let Some(rowid) = item_rowid(conn, id)? {
+        conn.execute("DELETE FROM items_fts WHERE rowid = ?1", [rowid])?;
+    }
+    Ok(())
+}
+
+/// Databases written before the repository maintained `items_fts` have no
+/// index rows at all, and a partially written index has fewer rows than live
+/// items. Rebuild from the stored items whenever the counts disagree.
+fn ensure_fts_index(conn: &Connection) -> Result<()> {
+    let live: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM items WHERE deleted_at IS NULL",
+        [],
+        |row| row.get(0),
+    )?;
+    let indexed: i64 = conn.query_row("SELECT COUNT(*) FROM items_fts", [], |row| row.get(0))?;
+    if live == indexed {
+        return Ok(());
+    }
+
+    conn.execute("DELETE FROM items_fts", [])?;
+    conn.execute(
+        "INSERT INTO items_fts (rowid, title, body_md, item_id)
+         SELECT rowid, title, body_md, id FROM items WHERE deleted_at IS NULL",
+        [],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -439,6 +535,218 @@ mod tests {
             ids(&library.list_prompts().expect("list")),
             vec![first.id.clone(), second.id.clone()]
         );
+    }
+
+    #[test]
+    fn search_finds_cjk_substrings_from_trigrams() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        library
+            .save(&item.id, "", "请把这段话翻译成英文")
+            .expect("save");
+
+        let hits = library.search_prompts("翻译成").expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, item.id);
+    }
+
+    #[test]
+    fn search_falls_back_to_like_for_short_queries() {
+        let (library, _clock, _ids) = library();
+        let cjk = library.create_prompt().expect("create cjk");
+        library
+            .save(&cjk.id, "", "请把这段话翻译成英文")
+            .expect("save cjk");
+        let latin = library.create_prompt().expect("create latin");
+        library
+            .save(&latin.id, "", "使用 AI 助手整理周报")
+            .expect("save latin");
+
+        let short_cjk = library.search_prompts("翻译").expect("search 翻译");
+        assert_eq!(short_cjk.len(), 1);
+        assert_eq!(short_cjk[0].id, cjk.id);
+
+        let short_latin = library.search_prompts("AI").expect("search AI");
+        assert_eq!(short_latin.len(), 1);
+        assert_eq!(short_latin[0].id, latin.id);
+    }
+
+    #[test]
+    fn search_is_case_insensitive_for_english_queries() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        library
+            .save(&item.id, "", "Hello World PROMPT")
+            .expect("save");
+
+        for query in ["hello world", "HELLO", "he", "world prompt"] {
+            let hits = library.search_prompts(query).expect("search");
+            assert_eq!(hits.len(), 1, "query {query:?} should match");
+            assert_eq!(hits[0].id, item.id);
+        }
+    }
+
+    fn summary_ids(items: &[ItemSummary]) -> Vec<String> {
+        items.iter().map(|item| item.id.clone()).collect()
+    }
+
+    #[test]
+    fn search_matches_titles_and_bodies() {
+        let (library, clock, _ids) = library();
+        let title_item = library.create_prompt().expect("create title item");
+        library
+            .save(&title_item.id, "模板标题示例", "正文无关")
+            .expect("save title item");
+        clock.advance(1_000);
+        let body_item = library.create_prompt().expect("create body item");
+        library
+            .save(&body_item.id, "无关标题", "这里包含正文短语")
+            .expect("save body item");
+
+        let hits = library.search_prompts("模板标题").expect("search title");
+        assert_eq!(summary_ids(&hits), vec![title_item.id.clone()]);
+
+        let hits = library.search_prompts("正文短语").expect("search body");
+        assert_eq!(summary_ids(&hits), vec![body_item.id.clone()]);
+
+        let hits = library.search_prompts("模板").expect("search short title");
+        assert_eq!(summary_ids(&hits), vec![title_item.id.clone()]);
+    }
+
+    #[test]
+    fn search_keeps_the_fts_index_in_sync_on_save() {
+        let (library, clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        library.save(&item.id, "", "alpha content").expect("save");
+        assert_eq!(library.search_prompts("alpha").expect("search").len(), 1);
+
+        clock.advance(REVISION_WINDOW_MS);
+        library.save(&item.id, "", "beta content").expect("save");
+
+        assert!(library.search_prompts("alpha").expect("search").is_empty());
+        assert_eq!(library.search_prompts("beta").expect("search").len(), 1);
+    }
+
+    #[test]
+    fn search_excludes_soft_deleted_items_from_both_query_paths() {
+        let (library, _clock, _ids) = library();
+        let kept = library.create_prompt().expect("create kept");
+        library
+            .save(&kept.id, "", "请把这段话翻译成英文")
+            .expect("save kept");
+        let removed = library.create_prompt().expect("create removed");
+        library
+            .save(&removed.id, "", "请把这句话翻译成法文")
+            .expect("save removed");
+
+        for query in ["翻译", "翻译成"] {
+            assert_eq!(
+                library.search_prompts(query).expect("search").len(),
+                2,
+                "query {query:?} should match both items before deletion"
+            );
+        }
+
+        library.soft_delete(&removed.id).expect("delete");
+
+        for query in ["翻译", "翻译成"] {
+            let hits = library.search_prompts(query).expect("search");
+            assert_eq!(summary_ids(&hits), vec![kept.id.clone()], "query {query:?}");
+        }
+        assert!(library.search_prompts("成法文").expect("search").is_empty());
+    }
+
+    #[test]
+    fn blank_search_lists_every_prompt_in_update_order() {
+        let (library, clock, _ids) = library();
+        let first = library.create_prompt().expect("create first");
+        clock.advance(1_000);
+        let second = library.create_prompt().expect("create second");
+        library.save(&first.id, "first", "one").expect("save first");
+        clock.advance(1_000);
+        library
+            .save(&second.id, "second", "two")
+            .expect("save second");
+
+        let hits = library.search_prompts("  ").expect("search");
+        assert_eq!(summary_ids(&hits), vec![second.id, first.id]);
+    }
+
+    #[test]
+    fn search_treats_query_syntax_literally() {
+        let (library, _clock, _ids) = library();
+        let percent = library.create_prompt().expect("create percent");
+        library
+            .save(&percent.id, "", "进度 100% 完成")
+            .expect("save percent");
+        let underscore = library.create_prompt().expect("create underscore");
+        library
+            .save(&underscore.id, "", "snake_case 命名")
+            .expect("save underscore");
+        let quoted = library.create_prompt().expect("create quoted");
+        library
+            .save(&quoted.id, "", "say \"hi\" now")
+            .expect("save quoted");
+
+        let hits = library.search_prompts("%").expect("search percent");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, percent.id);
+
+        let hits = library.search_prompts("_").expect("search underscore");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, underscore.id);
+
+        let hits = library.search_prompts("\"hi\"").expect("search quoted");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, quoted.id);
+    }
+
+    #[test]
+    fn opening_rebuilds_a_missing_fts_index_from_stored_items() {
+        let conn = crate::storage::open_in_memory().expect("open");
+        crate::storage::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO items (id, kind, title, body_md, created_at, updated_at)
+             VALUES ('legacy', 'prompt', '周报整理', '请把这段话翻译成英文', ?1, ?1)",
+            [T0],
+        )
+        .expect("insert legacy item");
+
+        let library =
+            Library::from_connection(conn, TestClock::new(T0), TestIds::new()).expect("library");
+
+        let hits = library.search_prompts("翻译成").expect("search");
+        assert_eq!(summary_ids(&hits), vec!["legacy"]);
+    }
+
+    #[test]
+    fn opening_rebuilds_a_partially_indexed_fts_table() {
+        let conn = crate::storage::open_in_memory().expect("open");
+        crate::storage::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO items (id, kind, title, body_md, created_at, updated_at)
+             VALUES ('indexed', 'prompt', '已索引', '请把这段话翻译成英文', ?1, ?1)",
+            [T0],
+        )
+        .expect("insert indexed item");
+        conn.execute(
+            "INSERT INTO items (id, kind, title, body_md, created_at, updated_at)
+             VALUES ('missing', 'prompt', '未索引', '请把这句话翻译成法文', ?1, ?1)",
+            [T0],
+        )
+        .expect("insert unindexed item");
+        conn.execute(
+            "INSERT INTO items_fts (rowid, title, body_md, item_id)
+             SELECT rowid, title, body_md, id FROM items WHERE id = 'indexed'",
+            [],
+        )
+        .expect("seed partial index");
+
+        let library =
+            Library::from_connection(conn, TestClock::new(T0), TestIds::new()).expect("library");
+
+        let hits = library.search_prompts("翻译成").expect("search");
+        assert_eq!(summary_ids(&hits).len(), 2);
     }
 
     #[test]

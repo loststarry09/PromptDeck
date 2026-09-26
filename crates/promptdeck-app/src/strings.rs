@@ -25,6 +25,8 @@ pub const THEME_LIGHT: &str = "亮色";
 pub const THEME_DARK: &str = "暗色";
 pub const RAIL_EXPAND: &str = "展开侧栏";
 pub const RAIL_COLLAPSE: &str = "收起侧栏";
+pub const SEARCH_PLACEHOLDER: &str = "搜索标题与正文…";
+pub const EMPTY_SEARCH_HINT: &str = "换个关键词，或清空搜索查看全部";
 
 pub fn install(ui: &AppWindow) {
     let strings = ui.global::<Strings>();
@@ -49,6 +51,12 @@ pub fn install(ui: &AppWindow) {
     strings.set_theme_dark(THEME_DARK.into());
     strings.set_rail_expand(RAIL_EXPAND.into());
     strings.set_rail_collapse(RAIL_COLLAPSE.into());
+    strings.set_search_placeholder(SEARCH_PLACEHOLDER.into());
+    strings.set_empty_search_hint(EMPTY_SEARCH_HINT.into());
+}
+
+pub fn empty_search_title(query: &str) -> String {
+    format!("没有找到「{}」", query.trim())
 }
 
 pub fn updated_label(now_ms: i64, updated_ms: i64) -> String {

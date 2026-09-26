@@ -24,6 +24,9 @@ export component AppWindow inherits Window {
     in-out property <string> body-text: "";
     in-out property <int> editor-focus-request: 0;
     in-out property <bool> rail-expanded: false;
+    in-out property <string> search-query: "";
+    in-out property <string> search-empty-title: "";
+    in-out property <bool> library-empty: false;
     out property <bool> title-focused: canvas.title-focused;
 
     callback new-prompt();
@@ -31,6 +34,7 @@ export component AppWindow inherits Window {
     callback text-edited();
     callback cycle-theme();
     callback toggle-rail();
+    callback search-edited();
 
     global-keys := FocusScope {
         KeyBinding {
@@ -66,8 +70,12 @@ export component AppWindow inherits Window {
                     LibraryPanel {
                         prompts: root.prompts;
                         selected-id: root.selected-id;
+                        search-query <=> root.search-query;
+                        search-empty-title: root.search-empty-title;
+                        library-empty: root.library-empty;
                         new-prompt => { root.new-prompt(); }
                         select-prompt(id) => { root.select-prompt(id); }
+                        search-edited => { root.search-edited(); }
                     }
                 }
             }

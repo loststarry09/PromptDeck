@@ -30,8 +30,8 @@
 ## 组件与状态纪律
 
 - 列表行内容 54px、行距 62px（分隔线上下各留 4px）；名称（强）+ 元数据（弱）+ 收藏标记；1px `rule` 分隔线弱于 hover 态。
-- 每个交互组件必须实现全部状态：default / hover / active / disabled / loading / error / success。
-- 焦点指示：2026-09-26 产品决策移除焦点环与聚焦高亮，键盘导航不提供可见焦点指示；不依赖颜色单独表达选中/错误/成功。
+- 按钮、列表行、分段切换器实现 default / hover / active / disabled 状态。文本输入（标题、搜索）实现 default / focus / disabled：Slint 的 `TextInput` 不暴露 hover，覆盖层又会破坏点击定位光标，故输入组件不设 hover 态（与 Slint 内置 `LineEdit` 及既有标题输入一致）；无禁用场景前不预留 disabled 样式。loading / error / success 按组件需要。
+- 焦点指示：2026-09-26 产品决策移除焦点环；按钮、列表等非输入元素不提供聚焦高亮；文本输入保留底部 accent 下划线作为聚焦提示（标题、搜索）。不依赖颜色单独表达选中/错误/成功。
 - 单手操作目标 ≥44×44px（紧凑窗口下亦然）。
 - 主 CTA 每区域一个；accent 覆盖 5–15%，不滥用。
 

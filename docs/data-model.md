@@ -72,7 +72,7 @@ CREATE VIRTUAL TABLE items_fts USING fts5(
 设计要点：
 
 - **统一 items + kind**：Prompt 与未来 Reusable Block 共用一张表，标签/版本/搜索无需迁移即可覆盖 block。
-- **FTS 用 trigram**：`unicode61` 对中文不分词，trigram 支持中英文子串匹配；不足 3 字符的查询由仓储层回退 `LIKE`。FTS 与 items 在同一事务内由仓储维护（不用触发器，便于测试与推理）。
+- **FTS 用 trigram**：`unicode61` 对中文不分词，trigram 支持中英文子串匹配；不足 3 字符的查询由仓储层回退 `LIKE`。FTS 与 items 在同一事务内由仓储维护（不用触发器，便于测试与推理）；打开时若索引行数与在用条目数不一致（FTS 维护上线前的既有库，或部分写入的索引），仓储按 rowid 重建。
 - **variables 为派生数据**：保存时解析正文写入；同名变量只存一次（首次出现的默认值生效）。
 - **versions 为内容快照**：`title + body_md`；`content_hash` 用于去重。
 

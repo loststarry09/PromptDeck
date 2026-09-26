@@ -78,6 +78,10 @@ impl Controller {
             let controller = controller.clone();
             ui.on_toggle_rail(move || controller.toggle_rail());
         }
+        {
+            let controller = controller.clone();
+            ui.on_search_edited(move || controller.search_edited());
+        }
 
         controller.refresh_items();
         controller.restore_selection();
@@ -185,9 +189,17 @@ impl Controller {
         self.select_prompt(id);
     }
 
+    pub fn search_edited(&self) {
+        self.refresh_items();
+    }
+
     fn refresh_items(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
         let now = self.library.now_ms();
-        let Ok(summaries) = self.library.list_prompts() else {
+        let query = ui.get_search_query().to_string();
+        let Ok(summaries) = self.library.search_prompts(&query) else {
             return;
         };
 
@@ -204,6 +216,18 @@ impl Controller {
             })
             .collect::<Vec<_>>();
 
+        let library_empty = rows.is_empty()
+            && self
+                .library
+                .list_prompts()
+                .map(|items| items.is_empty())
+                .unwrap_or(false);
+        ui.set_library_empty(library_empty);
+        ui.set_search_empty_title(if rows.is_empty() && !query.trim().is_empty() {
+            strings::empty_search_title(&query).into()
+        } else {
+            String::new().into()
+        });
         self.items.set_vec(rows);
     }
 }

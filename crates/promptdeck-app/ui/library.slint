@@ -57,6 +57,53 @@ component NewButton inherits FocusScope {
     }
 }
 
+component SearchField inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    callback edited();
+
+    height: 32px;
+    border-radius: Theme.radius-input;
+    background: Theme.control;
+    clip: true;
+
+    input := TextInput {
+        x: Theme.space-xs;
+        width: parent.width - 2 * Theme.space-xs;
+        height: parent.height;
+        single-line: true;
+        font-family: Theme.font-body;
+        font-size: Theme.text-base;
+        color: Theme.ink;
+        selection-background-color: Theme.selection;
+        selection-foreground-color: Theme.ink;
+        vertical-alignment: center;
+        edited => { root.edited(); }
+    }
+
+    Text {
+        x: Theme.space-xs;
+        width: parent.width - 2 * Theme.space-xs;
+        height: parent.height;
+        visible: input.text == "" && input.preedit-text == "";
+        text: Strings.search-placeholder;
+        font-family: Theme.font-body;
+        font-size: Theme.text-base;
+        color: Theme.ink-muted;
+        vertical-alignment: center;
+    }
+
+    Rectangle {
+        x: Theme.radius-input;
+        y: parent.height - self.height;
+        width: parent.width - 2 * Theme.radius-input;
+        height: 2px;
+        border-radius: 1px;
+        background: Theme.focus;
+        opacity: input.has-focus ? 1 : 0;
+        animate opacity { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+}
+
 component LibraryRow inherits Rectangle {
     in property <string> title;
     in property <string> updated-label;
@@ -132,14 +179,17 @@ component LibraryRow inherits Rectangle {
     }
 }
 
-component EmptyLibrary inherits Rectangle {
+component EmptyState inherits Rectangle {
+    in property <string> title;
+    in property <string> hint;
+
     vertical-stretch: 1;
 
     VerticalLayout {
         Rectangle { vertical-stretch: 1; }
 
         Text {
-            text: Strings.empty-library-title;
+            text: root.title;
             width: 100%;
             font-size: Theme.text-base;
             font-weight: 600;
@@ -148,7 +198,7 @@ component EmptyLibrary inherits Rectangle {
         }
 
         Text {
-            text: Strings.empty-library-hint;
+            text: root.hint;
             width: 100%;
             font-size: Theme.text-sm;
             color: Theme.ink-muted;
@@ -162,8 +212,12 @@ component EmptyLibrary inherits Rectangle {
 export component LibraryPanel inherits Rectangle {
     in property <[PromptRow]> prompts;
     in property <string> selected-id: "";
+    in-out property <string> search-query;
+    in property <string> search-empty-title;
+    in property <bool> library-empty;
     callback new-prompt();
     callback select-prompt(id: string);
+    callback search-edited();
 
     background: Theme.panel;
     border-radius: Theme.radius-panel;
@@ -194,7 +248,20 @@ export component LibraryPanel inherits Rectangle {
             }
         }
 
-        if root.prompts.length == 0 : EmptyLibrary { }
+        SearchField {
+            text <=> root.search-query;
+            edited => { root.search-edited(); }
+        }
+
+        if root.prompts.length == 0 && root.library-empty : EmptyState {
+            title: Strings.empty-library-title;
+            hint: Strings.empty-library-hint;
+        }
+
+        if root.prompts.length == 0 && !root.library-empty : EmptyState {
+            title: root.search-empty-title;
+            hint: Strings.empty-search-hint;
+        }
 
         if root.prompts.length > 0 : ListView {
             vertical-stretch: 1;
