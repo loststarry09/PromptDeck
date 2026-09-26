@@ -1,6 +1,10 @@
 # 工单 02 报告：搜索 —— 标题/正文，中文可用
 
-执行日期：2026-09-26。状态：**完成**。门槛、本地核心验证、WSLg 与 Windows 原生冒烟全部通过；改动随本工单提交（见 git log）。范围：列表面板搜索框即时过滤标题+正文；trigram（≥3 字符）与 `LIKE` 兜底（<3 字符）双路径；FTS 与条目同事务维护；软删除过滤；诚实空状态。
+执行日期：2026-09-26。状态：**完成并已推送**。
+
+- 提交：`0caaebc`（`feat: search prompts by title and body with trigram FTS`，11 文件，+603/−40）。
+- 远程：<https://github.com/loststarry09/PromptDeck>（public；含 01 引导提交 `16cda58`）。
+- 范围：列表面板搜索框即时过滤标题+正文；trigram（≥3 字符）与 `LIKE` 兜底（<3 字符）双路径；FTS 与条目同事务维护；软删除过滤；诚实空状态。
 
 ## 一、交付物
 
@@ -33,11 +37,11 @@
 
 ## 四、验证证据
 
-- **门槛**：`cargo fmt --check` 通过；`cargo clippy --workspace --all-targets` 0 警告；`cargo test --workspace` 42 passed（较 01 新增 15 个搜索相关用例）。
+- **门槛**：`cargo fmt --check` 通过；`cargo clippy --workspace --all-targets` 0 警告；`cargo test --workspace` 42 passed（较 01 新增 15 个用例：查询规划 5 + 库搜索/索引 10，清单见附录）。
 - **本地核心补验**（不涉及用户桌面）：以 Windows 开发库副本（`/tmp/opencode/pd-win-db2/`，FTS 维护前写入）经临时集成测试打开——索引自动重建后，2 字「周报」`LIKE` 命中「周报整理」、4 字「周报整理」trigram 命中、正文「自动保存」命中；测试跑完已删除。
-- **双端冒烟**：
+- **双端冒烟**（截图位于 `C:\Users\Carlos\AppData\Local\Temp\`）：
   - WSLg（Linux debug）：搜索框渲染占位「搜索标题与正文…」；2 字「报整」→ 仅「周报整理」；「周报整理」→ trigram 命中；「不存在的词」→「没有找到「不存在的词」」空态；清空 → 两条恢复（`t02-wsl-01`–`05`）。
-  - Windows 原生（release，MSVC 构建）：2 字「周报」命中；小写「promptdeck」命中正文「PromptDeck」（大小写不敏感）；「周报整理」trigram 命中；「找不到的词」空态；清空恢复两条（`t02-win-01`–`06`）。暗色主题下 token 与聚焦下划线正常。
+  - Windows 原生（release，MSVC 构建）：2 字「周报」命中；小写「promptdeck」命中正文「PromptDeck」（大小写不敏感）；「周报整理」trigram 命中；「找不到的词」空态；清空恢复两条（`t02-win-01`–`06`）。暗色主题下 token 与聚焦下划线正常；冒烟后实例已关闭。
   - 真实库索引回填：Windows 库 `items_fts` 行数 = 在用条目数 = 2（含空条目），搜索未改动任何用户内容。
 - **code-review 双轴**：Standards 与 Spec 两路审查，采纳的修复：软删除测试补 trigram 路径；空查询测试改为显式顺序断言（原为同义反复）；标题/正文 FTS 各用独立 3+ 字词验证；回填测试改用 trigram 查询并新增「部分索引重建」用例；移除 `RefCell` 镜像状态改读 UI 属性；空态判定改用 `library-empty` 布尔而非显示字符串；`search` 模块收敛公有面；SQL 列/排序常量化。未采纳（记录理由）：搜索框 hover 态——Slint `TextInput` 无 hover，覆盖层会破坏点击定位光标；已在 `docs/design-foundations.md` 明确输入组件豁免（与 Slint `LineEdit`、既有标题输入一致）。
 - **文档同步**：`docs/data-model.md`（索引不一致重建）、`docs/design-foundations.md`（输入组件状态与焦点指示口径）。
@@ -51,3 +55,26 @@
 ## 六、下一步建议
 
 按顺序进入 03（Markdown 只读渲染与模式切换），完成后同样以 fmt/clippy/test + 双端冒烟闭环。
+
+## 附录：新增用例清单（15）
+
+查询规划（`crates/promptdeck-core/src/search.rs`，5）：
+
+- `blank_queries_list_everything`
+- `three_or_more_characters_use_a_trigram_phrase`
+- `short_queries_fall_back_to_like`
+- `like_patterns_escape_wildcards_and_backslashes`
+- `fts_phrases_double_embedded_quotes`
+
+库搜索与索引维护（`crates/promptdeck-core/src/storage/library.rs`，10）：
+
+- `search_finds_cjk_substrings_from_trigrams`
+- `search_falls_back_to_like_for_short_queries`
+- `search_is_case_insensitive_for_english_queries`
+- `search_matches_titles_and_bodies`
+- `search_keeps_the_fts_index_in_sync_on_save`
+- `search_excludes_soft_deleted_items_from_both_query_paths`
+- `blank_search_lists_every_prompt_in_update_order`
+- `search_treats_query_syntax_literally`
+- `opening_rebuilds_a_missing_fts_index_from_stored_items`
+- `opening_rebuilds_a_partially_indexed_fts_table`
