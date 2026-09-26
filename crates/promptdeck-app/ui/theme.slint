@@ -1,0 +1,65 @@
+/* Hallmark · component: desktop-workbench-shell · genre: modern-minimal
+ * theme: studied-DNA (BlockHelm Workbench, design/design.md locked)
+ * source: design/design.md semantic tokens, OKLCH converted to sRGB once (2026-09-26)
+ * states: default · hover · active · disabled (loading/error/success按组件)
+ */
+
+import { Palette } from "std-widgets.slint";
+
+export global Theme {
+    in property <string> mode: "system";
+    private property <bool> system-dark: Palette.color-scheme == ColorScheme.dark;
+    out property <bool> dark: mode == "dark" || (mode == "system" && system-dark);
+
+    out property <color> paper: dark ? #181818 : #EEEEF0;
+    out property <color> paper-overlay: dark ? #181818D9 : #EEEEF0D9;
+    out property <color> panel: dark ? #4A4A4A80 : #FFFFFF80;
+    out property <color> card: dark ? #FFFFFF18 : #FFFFFFB2;
+    out property <color> control: dark ? #FFFFFF20 : #00000012;
+    out property <color> control-hover: dark ? #FFFFFF33 : #C0C4CB70;
+    out property <color> rule: dark ? #FFFFFF16 : #00000008;
+    out property <color> rule-strong: dark ? #FFFFFF42 : #00000024;
+    out property <color> ink: dark ? #F4F4F4 : #1F2937;
+    out property <color> ink-2: dark ? #FFFFFFB0 : #000000B0;
+    out property <color> ink-muted: dark ? #FFFFFF8F : #0000008F;
+    out property <color> accent: dark ? #22C55E : #2196F3;
+    out property <color> accent-hover: dark ? #46D06F : #1E8AE0;
+    out property <color> accent-pressed: dark ? #27AE55 : #1C7ECC;
+    out property <color> accent-ink: dark ? #0B0F0C : #10161F;
+    out property <color> focus: accent;
+    out property <color> shadow: #00000026;
+    out property <color> selection: dark ? #22C55E4D : #2196F34D;
+
+    out property <string> font-body: "Microsoft YaHei UI";
+    out property <string> font-mono: "Cascadia Mono";
+
+    out property <length> space-3xs: 4px;
+    out property <length> space-2xs: 8px;
+    out property <length> space-xs: 12px;
+    out property <length> space-sm: 16px;
+    out property <length> space-md: 24px;
+    out property <length> space-lg: 32px;
+
+    out property <length> text-xs: 11px;
+    out property <length> text-sm: 12px;
+    out property <length> text-base: 14px;
+    out property <length> text-md: 16px;
+    out property <length> text-lg: 20px;
+    out property <length> text-title: 24px;
+
+    out property <length> radius-caption: 6px;
+    out property <length> radius-input: 8px;
+    out property <length> radius-card: 10px;
+    out property <length> radius-nav: 12px;
+    out property <length> radius-panel: 14px;
+
+    out property <length> rail-collapsed: 62px;
+    out property <length> rail-expanded: 176px;
+    out property <length> panel-width: 224px;
+    out property <length> content-max: 800px;
+
+    out property <duration> dur-fast: 160ms;
+    out property <duration> dur-exit: 220ms;
+    out property <duration> dur-base: 240ms;
+    out property <duration> dur-rail: 360ms;
+}

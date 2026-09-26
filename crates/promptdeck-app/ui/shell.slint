@@ -1,0 +1,169 @@
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { AppIcon } from "icons.slint";
+
+component RailButton inherits FocusScope {
+    in property <image> icon;
+    in property <string> label;
+    in property <bool> expanded: false;
+    in property <bool> selected: false;
+    in property <bool> available: true;
+    callback clicked();
+
+    private property <string> display-label: root.available ? root.label : root.label + "（" + Strings.coming-soon + "）";
+    height: 46px;
+    focus-on-click: root.available;
+    focus-on-tab-navigation: root.available;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-nav;
+        background: root.selected ? Theme.control : (touch.has-hover && root.available ? Theme.control-hover : transparent);
+        animate background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-xs;
+        padding-right: Theme.space-xs;
+        spacing: Theme.space-xs;
+
+        VerticalLayout {
+            alignment: center;
+
+            AppIcon {
+                source: root.icon;
+                icon-size: 20px;
+                tint: root.selected ? Theme.ink : Theme.ink-2;
+                opacity: root.available ? 1 : 0.5;
+            }
+        }
+
+        Text {
+            text: root.display-label;
+            horizontal-stretch: 1;
+            opacity: root.expanded ? (root.available ? 1 : 0.45) : 0;
+            overflow: elide;
+            font-size: Theme.text-base;
+            font-weight: root.selected ? 600 : 400;
+            color: root.selected ? Theme.ink : Theme.ink-2;
+            vertical-alignment: center;
+            animate opacity { duration: Theme.dur-rail; easing: cubic-bezier(0.65, 0, 0.35, 1); }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: root.available ? pointer : default;
+        clicked => {
+            if (root.available) {
+                root.focus();
+                root.clicked();
+            }
+        }
+    }
+}
+
+component ThemeButton inherits FocusScope {
+    in property <bool> expanded: false;
+    callback clicked();
+
+    private property <string> label: Theme.mode == "system" ? Strings.theme-system : (Theme.mode == "dark" ? Strings.theme-dark : Strings.theme-light);
+
+    height: 40px;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-card;
+        background: touch.pressed ? Theme.control : (touch.has-hover ? Theme.control-hover : Theme.control);
+        animate background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-xs;
+        padding-right: Theme.space-xs;
+        spacing: Theme.space-xs;
+
+        VerticalLayout {
+            alignment: center;
+
+            AppIcon {
+                icon-size: 20px;
+                tint: Theme.ink-2;
+                source: Theme.mode == "system" ? @image-url("icons/theme-system.svg") : (Theme.mode == "dark" ? @image-url("icons/theme-dark.svg") : @image-url("icons/theme-light.svg"));
+            }
+        }
+
+        Text {
+            text: root.label;
+            horizontal-stretch: 1;
+            opacity: root.expanded ? 1 : 0;
+            overflow: elide;
+            font-size: Theme.text-sm;
+            color: Theme.ink-2;
+            vertical-alignment: center;
+            animate opacity { duration: Theme.dur-rail; easing: cubic-bezier(0.65, 0, 0.35, 1); }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.clicked();
+        }
+    }
+}
+
+export component SideRail inherits Rectangle {
+    in property <bool> expanded: false;
+    callback cycle-theme();
+    callback toggle-expanded();
+
+    width: expanded ? Theme.rail-expanded : Theme.rail-collapsed;
+    animate width { duration: Theme.dur-rail; easing: cubic-bezier(0.65, 0, 0.35, 1); }
+    background: transparent;
+
+    VerticalLayout {
+        padding-top: Theme.space-sm;
+        padding-bottom: Theme.space-sm;
+        padding-left: Theme.space-2xs;
+        padding-right: Theme.space-2xs;
+        spacing: Theme.space-3xs;
+
+        library-item := RailButton {
+            icon: @image-url("icons/rail-library.svg");
+            label: Strings.rail-library;
+            expanded: root.expanded;
+            selected: true;
+        }
+
+        inbox-item := RailButton {
+            icon: @image-url("icons/rail-inbox.svg");
+            label: Strings.rail-inbox;
+            expanded: root.expanded;
+            available: false;
+        }
+
+        settings-item := RailButton {
+            icon: @image-url("icons/rail-settings.svg");
+            label: Strings.rail-settings;
+            expanded: root.expanded;
+            available: false;
+        }
+
+        Rectangle { vertical-stretch: 1; }
+
+        rail-toggle := RailButton {
+            icon: root.expanded ? @image-url("icons/rail-collapse.svg") : @image-url("icons/rail-expand.svg");
+            label: root.expanded ? Strings.rail-collapse : Strings.rail-expand;
+            expanded: root.expanded;
+            clicked => { root.toggle-expanded(); }
+        }
+
+        theme-item := ThemeButton {
+            expanded: root.expanded;
+            clicked => { root.cycle-theme(); }
+        }
+    }
+}

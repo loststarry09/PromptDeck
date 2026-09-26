@@ -1,0 +1,10 @@
+import { Theme } from "theme.slint";
+
+export component AppIcon inherits Image {
+    in property <length> icon-size: 20px;
+    in property <color> tint: Theme.ink-2;
+
+    width: icon-size;
+    height: icon-size;
+    colorize: tint;
+}

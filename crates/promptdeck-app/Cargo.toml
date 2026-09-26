@@ -1,0 +1,17 @@
+[package]
+name = "promptdeck-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "promptdeck"
+path = "src/main.rs"
+
+[dependencies]
+promptdeck-core = { path = "../promptdeck-core" }
+slint.workspace = true
+chrono.workspace = true
+
+[build-dependencies]
+slint-build.workspace = true

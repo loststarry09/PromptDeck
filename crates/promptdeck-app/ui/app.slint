@@ -1,0 +1,88 @@
+import { Theme } from "theme.slint";
+export { Theme }
+import { Strings } from "strings.slint";
+export { Strings }
+import { SideRail } from "shell.slint";
+import { LibraryPanel, PromptRow } from "library.slint";
+import { Canvas } from "canvas.slint";
+
+export component AppWindow inherits Window {
+    title: Strings.app-title;
+    icon: @image-url("assets/app-icon.png");
+    preferred-width: 1080px;
+    preferred-height: 720px;
+    min-width: 820px;
+    min-height: 520px;
+    background: Theme.paper;
+    default-font-family: Theme.font-body;
+    default-font-size: Theme.text-base;
+    forward-focus: global-keys;
+
+    in-out property <[PromptRow]> prompts: [];
+    in-out property <string> selected-id: "";
+    in-out property <string> title-text: "";
+    in-out property <string> body-text: "";
+    in-out property <int> editor-focus-request: 0;
+    in-out property <bool> rail-expanded: false;
+    out property <bool> title-focused: canvas.title-focused;
+
+    callback new-prompt();
+    callback select-prompt(id: string);
+    callback text-edited();
+    callback cycle-theme();
+    callback toggle-rail();
+
+    global-keys := FocusScope {
+        KeyBinding {
+            keys: @keys(Control + N);
+            activated => { root.new-prompt(); }
+        }
+
+        Rectangle {
+            width: 100%;
+            height: 100%;
+
+            rail := SideRail {
+                x: 0;
+                y: 0;
+                height: 100%;
+                expanded: root.rail-expanded;
+                cycle-theme => { root.cycle-theme(); }
+                toggle-expanded => { root.toggle-rail(); }
+            }
+
+            panel-box := Rectangle {
+                x: rail.width;
+                y: 0;
+                width: Theme.space-md + Theme.panel-width + Theme.space-sm;
+                height: 100%;
+
+                HorizontalLayout {
+                    padding-left: Theme.space-md;
+                    padding-top: Theme.space-md;
+                    padding-right: Theme.space-sm;
+                    padding-bottom: Theme.space-md;
+
+                    LibraryPanel {
+                        prompts: root.prompts;
+                        selected-id: root.selected-id;
+                        new-prompt => { root.new-prompt(); }
+                        select-prompt(id) => { root.select-prompt(id); }
+                    }
+                }
+            }
+
+            canvas := Canvas {
+                x: rail.width + panel-box.width;
+                y: 0;
+                width: parent.width - rail.width - panel-box.width;
+                height: 100%;
+                has-selection: root.selected-id != "";
+                title-text <=> root.title-text;
+                body-text <=> root.body-text;
+                focus-request: root.editor-focus-request;
+                text-edited => { root.text-edited(); }
+            }
+        }
+    }
+}

@@ -1,0 +1,231 @@
+import { Theme } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Strings } from "strings.slint";
+
+component SourceEditor inherits Rectangle {
+    in-out property <string> text <=> input.text;
+    callback edited();
+
+    clip: true;
+    background: transparent;
+
+    scroll := ScrollView {
+        width: 100%;
+        height: 100%;
+        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+        vertical-scrollbar-policy: ScrollBarPolicy.as-needed;
+        content-width: self.visible-width;
+        content-height: max(self.visible-height, input.preferred-height);
+
+        input := TextInput {
+            width: parent.width;
+            single-line: false;
+            wrap: word-wrap;
+            font-family: Theme.font-body;
+            font-size: Theme.text-base;
+            color: Theme.ink;
+            selection-background-color: Theme.selection;
+            selection-foreground-color: Theme.ink;
+            page-height: scroll.visible-height;
+            edited => { root.edited(); }
+            cursor-position-changed(cpos) => {
+                if (cpos.y + scroll.content-y < 0px) {
+                    scroll.content-y = min(0px, max(parent.visible-height - self.height, -cpos.y));
+                } else if (cpos.y + scroll.content-y > parent.visible-height - 20px) {
+                    scroll.content-y = min(0px, max(parent.visible-height - self.height, parent.visible-height - cpos.y - 20px));
+                }
+            }
+        }
+    }
+
+    Text {
+        x: 0;
+        y: 0;
+        width: 100%;
+        text: root.text == "" ? Strings.editor-placeholder : "";
+        font-family: Theme.font-body;
+        font-size: Theme.text-base;
+        color: Theme.ink-muted;
+        vertical-alignment: top;
+    }
+
+    public function focus-editor() {
+        input.focus();
+    }
+}
+
+component ModeSegment inherits FocusScope {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> available: true;
+    callback clicked();
+
+    out property <bool> hovering: touch.has-hover;
+    height: 28px;
+    focus-on-click: root.available;
+    focus-on-tab-navigation: root.available;
+    min-width: 64px;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-input;
+        background: root.selected ? Theme.card : (touch.has-hover && root.available ? Theme.control-hover : transparent);
+        animate background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+
+    Text {
+        text: root.label;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        font-size: Theme.text-sm;
+        font-weight: root.selected ? 600 : 400;
+        color: root.selected ? Theme.ink : (root.available ? Theme.ink-2 : Theme.ink-muted);
+        opacity: root.available ? 1 : 0.6;
+    }
+
+    touch := TouchArea {
+        enabled: root.available;
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.clicked();
+        }
+    }
+}
+
+component ModeSwitcher inherits Rectangle {
+    height: 32px;
+    border-radius: Theme.radius-card;
+    background: Theme.control;
+
+    HorizontalLayout {
+        padding: 2px;
+        spacing: 2px;
+
+        ModeSegment {
+            label: Strings.mode-source;
+            selected: true;
+        }
+
+        ModeSegment {
+            label: Strings.mode-markdown;
+            available: false;
+        }
+    }
+}
+
+export component Canvas inherits Rectangle {
+    in-out property <string> title-text <=> title-input.text;
+    in-out property <string> body-text <=> editor.text;
+    in property <bool> has-selection: false;
+    in property <int> focus-request: 0;
+    out property <bool> title-focused: title-input.has-focus;
+    callback text-edited();
+
+    background: transparent;
+
+    changed focus-request => {
+        editor.focus-editor();
+    }
+
+    VerticalLayout {
+        visible: !root.has-selection;
+        spacing: Theme.space-2xs;
+
+        Rectangle { vertical-stretch: 1; }
+
+        Text {
+            text: Strings.empty-canvas-title;
+            width: 100%;
+            font-size: Theme.text-md;
+            font-weight: 600;
+            color: Theme.ink-2;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: Strings.empty-canvas-hint;
+            width: 100%;
+            font-size: Theme.text-sm;
+            color: Theme.ink-muted;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { vertical-stretch: 2; }
+    }
+
+    HorizontalLayout {
+        visible: root.has-selection;
+
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: Theme.space-lg;
+        }
+
+        VerticalLayout {
+            horizontal-stretch: 100;
+            min-width: 0;
+            max-width: Theme.content-max;
+            padding-top: Theme.space-md;
+            padding-bottom: Theme.space-sm;
+            spacing: Theme.space-xs;
+
+            Rectangle {
+                height: 44px;
+
+                title-input := TextInput {
+                    width: 100%;
+                    height: 100%;
+                    single-line: true;
+                    font-family: Theme.font-body;
+                    font-size: Theme.text-title;
+                    font-weight: 600;
+                    color: Theme.ink;
+                    vertical-alignment: center;
+                    edited => { root.text-edited(); }
+                }
+
+                Text {
+                    x: 0;
+                    y: 0;
+                    width: 100%;
+                    height: 100%;
+                    visible: title-input.text == "";
+                    text: Strings.title-placeholder;
+                    font-family: Theme.font-body;
+                    font-size: Theme.text-title;
+                    font-weight: 600;
+                    color: Theme.ink-muted;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    y: parent.height - self.height;
+                    width: 100%;
+                    height: title-input.has-focus ? 2px : 1px;
+                    background: title-input.has-focus ? Theme.focus : Theme.rule-strong;
+                    animate height, background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                }
+            }
+
+            editor := SourceEditor {
+                vertical-stretch: 1;
+                edited => { root.text-edited(); }
+            }
+
+            HorizontalLayout {
+                spacing: 0;
+
+                ModeSwitcher { }
+
+                Rectangle { horizontal-stretch: 1; }
+            }
+        }
+
+        Rectangle {
+            horizontal-stretch: 1;
+            min-width: Theme.space-lg;
+        }
+    }
+}

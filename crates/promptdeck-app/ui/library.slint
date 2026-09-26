@@ -1,0 +1,210 @@
+import { Theme } from "theme.slint";
+import { ListView } from "std-widgets.slint";
+import { Strings } from "strings.slint";
+import { AppIcon } from "icons.slint";
+
+export struct PromptRow {
+    id: string,
+    title: string,
+    updated-label: string,
+}
+
+component NewButton inherits FocusScope {
+    callback clicked();
+
+    out property <bool> hovering: touch.has-hover;
+    height: 32px;
+    min-width: 72px;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-input;
+        background: touch.pressed ? Theme.accent-pressed : (touch.has-hover ? Theme.accent-hover : Theme.accent);
+        animate background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: Theme.space-xs;
+        spacing: 6px;
+
+        VerticalLayout {
+            alignment: center;
+
+            AppIcon {
+                source: @image-url("icons/action-add.svg");
+                tint: Theme.accent-ink;
+                icon-size: 16px;
+            }
+        }
+
+        Text {
+            text: Strings.action-new;
+            font-size: Theme.text-sm;
+            font-weight: 600;
+            color: Theme.accent-ink;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.clicked();
+        }
+    }
+}
+
+component LibraryRow inherits Rectangle {
+    in property <string> title;
+    in property <string> updated-label;
+    in property <bool> selected: false;
+    callback clicked();
+
+    private property <length> content-height: 54px;
+
+    height: content-height + 8px;
+    clip: true;
+
+    pill := Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 100%;
+        height: root.content-height;
+        border-radius: Theme.radius-input;
+        background: root.selected ? Theme.control : (touch.has-hover ? Theme.control-hover : transparent);
+        animate background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+
+    Rectangle {
+        x: 0;
+        y: (parent.height - self.height) / 2;
+        width: root.selected ? 3px : 0px;
+        height: root.content-height - Theme.space-md;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+
+    VerticalLayout {
+        x: 14px;
+        width: parent.width - 22px;
+        y: (parent.height - root.content-height) / 2;
+        height: root.content-height;
+        alignment: center;
+        spacing: 2px;
+
+        Text {
+            text: root.title;
+            font-size: Theme.text-base;
+            font-weight: 600;
+            color: Theme.ink;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.updated-label;
+            font-size: Theme.text-sm;
+            color: Theme.ink-muted;
+            overflow: elide;
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        width: parent.width;
+        height: 1px;
+        background: Theme.rule;
+    }
+
+    row-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            row-focus.focus();
+            root.clicked();
+        }
+    }
+}
+
+component EmptyLibrary inherits Rectangle {
+    vertical-stretch: 1;
+
+    VerticalLayout {
+        Rectangle { vertical-stretch: 1; }
+
+        Text {
+            text: Strings.empty-library-title;
+            width: 100%;
+            font-size: Theme.text-base;
+            font-weight: 600;
+            color: Theme.ink-2;
+            horizontal-alignment: center;
+        }
+
+        Text {
+            text: Strings.empty-library-hint;
+            width: 100%;
+            font-size: Theme.text-sm;
+            color: Theme.ink-muted;
+            horizontal-alignment: center;
+        }
+
+        Rectangle { vertical-stretch: 2; }
+    }
+}
+
+export component LibraryPanel inherits Rectangle {
+    in property <[PromptRow]> prompts;
+    in property <string> selected-id: "";
+    callback new-prompt();
+    callback select-prompt(id: string);
+
+    background: Theme.panel;
+    border-radius: Theme.radius-panel;
+    drop-shadow-color: Theme.shadow;
+    drop-shadow-blur: 15px;
+    drop-shadow-offset-y: 2px;
+    clip: true;
+
+    VerticalLayout {
+        padding: Theme.space-sm;
+        spacing: Theme.space-xs;
+
+        HorizontalLayout {
+            spacing: Theme.space-2xs;
+
+            Text {
+                text: Strings.library-heading;
+                horizontal-stretch: 1;
+                font-size: Theme.text-lg;
+                font-weight: 600;
+                color: Theme.ink;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+
+            NewButton {
+                clicked => { root.new-prompt(); }
+            }
+        }
+
+        if root.prompts.length == 0 : EmptyLibrary { }
+
+        if root.prompts.length > 0 : ListView {
+            vertical-stretch: 1;
+
+            for row in root.prompts : LibraryRow {
+                title: row.title;
+                updated-label: row.updated-label;
+                selected: row.id == root.selected-id;
+                clicked => { root.select-prompt(row.id); }
+            }
+        }
+    }
+}
