@@ -1,6 +1,7 @@
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { AppIcon } from "icons.slint";
+import { FocusRing } from "focusring.slint";
 
 component RailButton inherits FocusScope {
     in property <image> icon;
@@ -14,6 +15,17 @@ component RailButton inherits FocusScope {
     height: 46px;
     focus-on-click: root.available;
     focus-on-tab-navigation: root.available;
+
+    private property <bool> keyboard-focus: false;
+    focus-gained(reason) => { root.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { root.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (root.available && (event.text == Key.Return || event.text == Key.Space)) {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
 
     Rectangle {
         width: 100%;
@@ -56,10 +68,14 @@ component RailButton inherits FocusScope {
         mouse-cursor: root.available ? pointer : default;
         clicked => {
             if (root.available) {
-                root.focus();
                 root.clicked();
             }
         }
+    }
+
+    FocusRing {
+        shown: root.keyboard-focus;
+        radius: Theme.radius-nav;
     }
 }
 
@@ -70,6 +86,17 @@ component ThemeButton inherits FocusScope {
     private property <string> label: Theme.mode == "system" ? Strings.theme-system : (Theme.mode == "dark" ? Strings.theme-dark : Strings.theme-light);
 
     height: 40px;
+
+    private property <bool> keyboard-focus: false;
+    focus-gained(reason) => { root.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { root.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == Key.Space) {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
 
     Rectangle {
         width: 100%;
@@ -112,6 +139,11 @@ component ThemeButton inherits FocusScope {
             root.focus();
             root.clicked();
         }
+    }
+
+    FocusRing {
+        shown: root.keyboard-focus;
+        radius: Theme.radius-card;
     }
 }
 

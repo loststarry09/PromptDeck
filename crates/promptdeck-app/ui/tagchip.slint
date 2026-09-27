@@ -1,12 +1,13 @@
 /* Hallmark · component: tag-chip · genre: modern-minimal
  * theme: studied-DNA (BlockHelm Workbench, design/design.md locked)
  * source: design/design.md semantic tokens via ui/theme.slint
- * states: default · hover · active · selected
- * 焦点：遵循 2026-09-26 产品决策，非输入元素不提供聚焦高亮（键盘 Tab 无可见指示）。
+ * states: default · hover · active · selected · focus-visible
+ * 焦点：键盘（Tab）导航时显示 2px accent 环；指针点击不显示（focus-visible）。
  */
 
 import { Theme } from "theme.slint";
 import { AppIcon } from "icons.slint";
+import { FocusRing } from "focusring.slint";
 
 export component TagChip inherits FocusScope {
     in property <string> label;
@@ -19,6 +20,11 @@ export component TagChip inherits FocusScope {
     focus-on-click: false;
     min-width: 28px;
     max-width: 160px;
+
+    /* 键盘可见性：只在 Tab 导航聚焦时显示 2px accent 环，指针点击不显示。 */
+    private property <bool> keyboard-focus: false;
+    focus-gained(reason) => { root.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { root.keyboard-focus = false; }
 
     key-pressed(event) => {
         if (event.text == Key.Return || event.text == Key.Space) {
@@ -78,5 +84,10 @@ export component TagChip inherits FocusScope {
 
             clicked => { root.removed(); }
         }
+    }
+
+    FocusRing {
+        shown: root.keyboard-focus;
+        radius: Theme.radius-caption;
     }
 }

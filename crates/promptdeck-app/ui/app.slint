@@ -37,6 +37,9 @@ export component AppWindow inherits Window {
     in-out property <MarkdownSelection> markdown-selection;
     in-out property <int> markdown-geometry-tick: 0;
     in-out property <bool> copy-feedback: false;
+    in-out property <int> save-state: 0;
+    in-out property <int> selected-index: -1;
+    in-out property <int> search-focus-request: 0;
     out property <bool> title-focused: canvas.title-focused;
 
     callback new-prompt();
@@ -61,6 +64,9 @@ export component AppWindow inherits Window {
     callback copy-selection();
     callback copy-resolved();
     callback select-all();
+    callback save-requested();
+    callback move-selection(delta: int);
+    callback open-selected();
 
     global-keys := FocusScope {
         KeyBinding {
@@ -71,6 +77,11 @@ export component AppWindow inherits Window {
         KeyBinding {
             keys: @keys(Control + M);
             activated => { root.toggle-mode(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + S);
+            activated => { root.save-requested(); }
         }
 
         /* Ctrl+Shift+C 是全局复制快捷键：在编辑输入获得事件前拦截，
@@ -115,11 +126,15 @@ export component AppWindow inherits Window {
                         search-empty-title: root.search-empty-title;
                         library-empty: root.library-empty;
                         tag-filter: root.tag-filter;
+                        focus-request: root.search-focus-request;
+                        selected-index: root.selected-index;
                         new-prompt => { root.new-prompt(); }
                         select-prompt(id) => { root.select-prompt(id); }
                         search-edited => { root.search-edited(); }
                         toggle-tag-filter(tag) => { root.toggle-tag-filter(tag); }
                         clear-tag-filter => { root.clear-tag-filter(); }
+                        move-selection(delta) => { root.move-selection(delta); }
+                        open-selected => { root.open-selected(); }
                     }
                 }
             }
@@ -138,6 +153,7 @@ export component AppWindow inherits Window {
                 markdown-selection: root.markdown-selection;
                 markdown-geometry-tick: root.markdown-geometry-tick;
                 copy-feedback: root.copy-feedback;
+                save-state: root.save-state;
                 title-text <=> root.title-text;
                 body-text <=> root.body-text;
                 focus-request: root.editor-focus-request;
@@ -154,6 +170,7 @@ export component AppWindow inherits Window {
                 markdown-double-clicked(x, y) => { root.markdown-double-clicked(x, y); }
                 copy-selection => { root.copy-selection(); }
                 select-all => { root.select-all(); }
+                return-to-list => { root.search-focus-request += 1; }
             }
         }
     }

@@ -3,13 +3,14 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
-use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel, Weak};
 
 use promptdeck_core::error::Result as CoreResult;
 use promptdeck_core::model::Tag;
 use promptdeck_core::storage::library::{Library, SETTING_RAIL_EXPANDED, SETTING_THEME};
 use promptdeck_core::variables;
 
+use crate::listnav::stepped_index;
 use crate::markdown;
 use crate::selection::{BlockInfo, Document, Position, Selection};
 use crate::strings;
@@ -47,6 +48,27 @@ impl ViewMode {
             Self::Source
         } else {
             Self::Markdown
+        }
+    }
+}
+
+/// 自动保存/手动 flush 的可见状态。`Idle` 仅用于没有选中 Prompt 时（状态行不显示）。
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum SaveState {
+    #[default]
+    Idle,
+    Saving,
+    Saved,
+    Failed,
+}
+
+impl SaveState {
+    fn as_ui(self) -> i32 {
+        match self {
+            SaveState::Idle => 0,
+            SaveState::Saving => 1,
+            SaveState::Saved => 2,
+            SaveState::Failed => 3,
         }
     }
 }
@@ -245,6 +267,18 @@ impl Controller {
             let controller = controller.clone();
             ui.on_select_all(move || controller.select_all());
         }
+        {
+            let controller = controller.clone();
+            ui.on_save_requested(move || controller.flush_now());
+        }
+        {
+            let controller = controller.clone();
+            ui.on_move_selection(move |delta| controller.move_selection(delta));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_open_selected(move || controller.open_selected());
+        }
 
         controller.refresh_items();
         controller.restore_selection();
@@ -252,17 +286,30 @@ impl Controller {
         Ok(controller)
     }
 
+    /// 新建 Prompt：先落盘当前编辑，再清空搜索/标签筛选，确保新 Prompt 一定出现
+    /// 在列表里。若落盘失败则中止，绝不切换而丢掉正在编辑的内容。
     pub fn new_prompt(&self) {
-        self.flush();
+        if !self.flush() {
+            return;
+        }
         let Ok(item) = self.library.create_prompt() else {
             return;
         };
+        self.clear_search_and_filters();
         self.refresh_items();
         self.select_prompt(Some(item.id));
     }
 
     pub fn select_prompt(&self, id: Option<String>) {
-        self.flush();
+        self.select_prompt_with_focus(id, true);
+    }
+
+    /// 选中 Prompt 并加载到画布。`focus_editor` 为 `false` 时（键盘 ↑/↓ 导航）
+    /// 不动焦点，让搜索框保持键盘归属。落盘失败时不切换，保留当前编辑内容。
+    fn select_prompt_with_focus(&self, id: Option<String>, focus_editor: bool) {
+        if !self.flush() {
+            return;
+        }
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
@@ -282,7 +329,10 @@ impl Controller {
                 ui.set_pinned(item.pinned);
                 self.sync_tags(&ui, &item.id);
                 self.apply_mode(self.mode_for(&item.id), &ui);
-                ui.set_editor_focus_request(ui.get_editor_focus_request() + 1);
+                self.set_save_state(SaveState::Saved);
+                if focus_editor {
+                    ui.set_editor_focus_request(ui.get_editor_focus_request() + 1);
+                }
             }
             None => {
                 *self.active_id.borrow_mut() = None;
@@ -293,7 +343,34 @@ impl Controller {
                 ui.set_tags(tags_model(&[]));
                 ui.set_markdown_mode(false);
                 self.clear_markdown_blocks(&ui);
+                self.set_save_state(SaveState::Idle);
             }
+        }
+        self.sync_selection_index(&ui);
+    }
+
+    /// `↑`/`↓`：在当前（筛选后的）列表中移动选择，不抢走搜索框焦点。
+    pub fn move_selection(&self, delta: i32) {
+        let Some(next) = stepped_index(self.selected_row_index(), self.items.row_count(), delta)
+        else {
+            return;
+        };
+        let Some(row) = self.items.row_data(next) else {
+            return;
+        };
+        let id = row.id.to_string();
+        self.select_prompt_with_focus(Some(id), false);
+    }
+
+    /// `Enter`：打开当前选中项（把焦点交给画布）。若列表已有结果但未选中，先选首条。
+    pub fn open_selected(&self) {
+        if self.active_id.borrow().is_none() {
+            self.move_selection(1);
+        }
+        if self.active_id.borrow().is_some()
+            && let Some(ui) = self.ui.upgrade()
+        {
+            ui.set_editor_focus_request(ui.get_editor_focus_request() + 1);
         }
     }
 
@@ -423,6 +500,7 @@ impl Controller {
         self.modes.borrow_mut().insert(id, mode);
         if let Some(ui) = self.ui.upgrade() {
             self.apply_mode(mode, &ui);
+            ui.set_editor_focus_request(ui.get_editor_focus_request() + 1);
         }
     }
 
@@ -588,32 +666,52 @@ impl Controller {
 
     pub fn mark_dirty(&self) {
         self.dirty.set(true);
+        if self.active_id.borrow().is_some() {
+            self.set_save_state(SaveState::Saving);
+        }
         self.save_timer.restart();
     }
 
-    pub fn flush(&self) {
+    /// 把当前编辑落盘。返回是否安全（无未保存改动，或已成功写入）。保存失败时
+    /// 保持 `dirty` 并保留 UI 内容，调用方据此中止会丢弃内容的切换/新建。
+    pub fn flush(&self) -> bool {
         if !self.dirty.get() {
-            return;
+            return true;
         }
         let Some(ui) = self.ui.upgrade() else {
-            return;
+            return false;
         };
         let Some(id) = self.active_id.borrow().clone() else {
-            return;
+            self.dirty.set(false);
+            return true;
         };
 
         let title = ui.get_title_text().to_string();
         let body_md = ui.get_body_text().to_string();
 
-        let Ok(item) = self.library.save(&id, &title, &body_md) else {
-            return;
-        };
-
-        self.dirty.set(false);
-        if !ui.get_title_focused() && ui.get_title_text().as_str() != item.title {
-            ui.set_title_text(item.title.clone().into());
+        match self.library.save(&id, &title, &body_md) {
+            Ok(item) => {
+                self.dirty.set(false);
+                if !ui.get_title_focused() && ui.get_title_text().as_str() != item.title {
+                    ui.set_title_text(item.title.clone().into());
+                }
+                self.set_save_state(SaveState::Saved);
+                self.refresh_items();
+                true
+            }
+            Err(error) => {
+                eprintln!("promptdeck: 保存失败：{error}");
+                self.set_save_state(SaveState::Failed);
+                false
+            }
         }
-        self.refresh_items();
+    }
+
+    /// `Ctrl+S`：即使没有未保存改动也给出一次「已保存」确认；失败则维持失败状态。
+    pub fn flush_now(&self) {
+        if self.flush() && self.active_id.borrow().is_some() {
+            self.set_save_state(SaveState::Saved);
+        }
     }
 
     pub fn cycle_theme(&self) {
@@ -648,6 +746,46 @@ impl Controller {
                 .and_then(|items| items.first().map(|item| item.id.clone()))
         });
         self.select_prompt(id);
+    }
+
+    /// 当前选中 Prompt 在（筛选后的）列表模型中的下标；被筛掉时为 `None`。
+    fn selected_row_index(&self) -> Option<usize> {
+        let active = self.active_id.borrow().clone()?;
+        (0..self.items.row_count()).find(|index| {
+            self.items
+                .row_data(*index)
+                .map(|row| row.id.as_str() == active)
+                .unwrap_or(false)
+        })
+    }
+
+    fn sync_selection_index(&self, ui: &AppWindow) {
+        let index = self.selected_row_index().map_or(-1, |index| index as i32);
+        if ui.get_selected_index() != index {
+            ui.set_selected_index(index);
+        }
+    }
+
+    fn set_save_state(&self, state: SaveState) {
+        if let Some(ui) = self.ui.upgrade()
+            && ui.get_save_state() != state.as_ui()
+        {
+            ui.set_save_state(state.as_ui());
+        }
+    }
+
+    /// 新建 Prompt 时清空搜索词与标签筛选，保证新 Prompt 一定出现在列表中。
+    fn clear_search_and_filters(&self) {
+        *self.active_tag.borrow_mut() = None;
+        if let Some(ui) = self.ui.upgrade() {
+            if !ui.get_search_query().is_empty() {
+                ui.set_search_query("".into());
+            }
+            if !ui.get_tag_filter().is_empty() {
+                ui.set_tag_filter("".into());
+            }
+        }
+        self.refresh_items();
     }
 
     pub fn search_edited(&self) {
@@ -697,5 +835,6 @@ impl Controller {
             String::new().into()
         });
         self.items.set_vec(rows);
+        self.sync_selection_index(&ui);
     }
 }

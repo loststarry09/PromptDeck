@@ -1,0 +1,20 @@
+/* Hallmark · component: focus-ring · genre: modern-minimal
+ * theme: studied-DNA (BlockHelm Workbench, design/design.md locked)
+ * source: design/design.md accessibility — 2px focus indicator with ≥3:1 contrast
+ * 键盘可见性：仅在键盘（Tab）导航获得焦点时出现，指针点击不显示，避免常驻焦点环。
+ */
+
+import { Theme } from "theme.slint";
+
+export component FocusRing inherits Rectangle {
+    in property <bool> shown: false;
+    in property <length> radius: Theme.radius-input;
+    in property <color> ring-color: Theme.focus;
+
+    visible: root.shown;
+    width: 100%;
+    height: 100%;
+    border-radius: root.radius;
+    border-width: 2px;
+    border-color: root.ring-color;
+}

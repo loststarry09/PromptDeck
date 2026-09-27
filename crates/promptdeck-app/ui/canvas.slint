@@ -9,6 +9,7 @@ import { ScrollView } from "std-widgets.slint";
 import { Strings } from "strings.slint";
 import { AppIcon } from "icons.slint";
 import { TagChip } from "tagchip.slint";
+import { FocusRing } from "focusring.slint";
 import { MarkdownBlock, MarkdownSelection, MarkdownView } from "markdown.slint";
 
 component SourceEditor inherits Rectangle {
@@ -18,6 +19,7 @@ component SourceEditor inherits Rectangle {
         ? 0
         : clamp(-scroll.content-y / root.max-scroll, 0, 1);
     callback edited();
+    callback return-requested();
 
     clip: true;
     background: transparent;
@@ -49,6 +51,13 @@ component SourceEditor inherits Rectangle {
             selection-foreground-color: Theme.ink;
             page-height: scroll.visible-height;
             edited => { root.edited(); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.return-requested();
+                    return accept;
+                }
+                return reject;
+            }
             cursor-position-changed(cpos) => {
                 if (cpos.y + scroll.content-y < 0px) {
                     scroll.content-y = min(0px, max(parent.visible-height - self.height, -cpos.y));
@@ -85,6 +94,17 @@ component ModeSegment inherits FocusScope {
     focus-on-tab-navigation: true;
     min-width: 64px;
 
+    private property <bool> keyboard-focus: false;
+    focus-gained(reason) => { root.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { root.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == Key.Space) {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
+
     Rectangle {
         width: 100%;
         height: 100%;
@@ -111,6 +131,11 @@ component ModeSegment inherits FocusScope {
             root.clicked();
         }
     }
+
+    FocusRing {
+        shown: root.keyboard-focus;
+        radius: Theme.radius-input;
+    }
 }
 
 component PinButton inherits FocusScope {
@@ -120,6 +145,17 @@ component PinButton inherits FocusScope {
     height: 32px;
     focus-on-click: true;
     focus-on-tab-navigation: true;
+
+    private property <bool> keyboard-focus: false;
+    focus-gained(reason) => { root.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { root.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == Key.Space) {
+            root.toggled();
+            return accept;
+        }
+        return reject;
+    }
 
     Rectangle {
         width: 100%;
@@ -161,6 +197,11 @@ component PinButton inherits FocusScope {
             root.toggled();
         }
     }
+
+    FocusRing {
+        shown: root.keyboard-focus;
+        radius: Theme.radius-input;
+    }
 }
 
 component ModeSwitcher inherits Rectangle {
@@ -201,11 +242,13 @@ export component Canvas inherits Rectangle {
     in property <MarkdownSelection> markdown-selection;
     in-out property <int> markdown-geometry-tick: 0;
     in property <bool> copy-feedback: false;
+    in property <int> save-state: 0;
     in property <int> focus-request: 0;
     out property <bool> title-focused: title-input.has-focus;
     callback text-edited();
     callback mode-selected(mode: int);
     callback toggle-pin();
+    callback return-to-list();
     callback tag-submitted(name: string);
     callback tag-removed(tag: string);
     callback tag-edited();
@@ -222,13 +265,17 @@ export component Canvas inherits Rectangle {
 
     background: transparent;
 
+    /* 焦点只由显式请求驱动：打开/新建/用户主动切模式时落在画布（或 Markdown
+       锚点），键盘 ↑/↓ 在列表中导航时不抢走搜索框焦点。 */
     changed focus-request => {
         scroll-sync.stop();
         root.sync-pending = false;
         root.pending-scroll-fraction = 0;
         editor.reset-scroll();
         markdown.reset-scroll();
-        if (!root.markdown-mode) {
+        if (root.markdown-mode) {
+            mode-anchor.focus();
+        } else {
             editor.focus-editor();
         }
     }
@@ -237,11 +284,6 @@ export component Canvas inherits Rectangle {
         root.pending-scroll-fraction = root.markdown-mode ? editor.scroll-fraction : markdown.scroll-fraction;
         root.sync-pending = true;
         scroll-sync.start();
-        if (root.markdown-mode) {
-            mode-anchor.focus();
-        } else {
-            editor.focus-editor();
-        }
     }
 
     scroll-sync := Timer {
@@ -272,6 +314,14 @@ export component Canvas inherits Rectangle {
         KeyBinding {
             keys: @keys(Control + A);
             activated => { root.select-all(); }
+        }
+
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.return-to-list();
+                return accept;
+            }
+            return reject;
         }
     }
 
@@ -336,6 +386,13 @@ export component Canvas inherits Rectangle {
                         color: Theme.ink;
                         vertical-alignment: center;
                         edited => { root.text-edited(); }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                root.return-to-list();
+                                return accept;
+                            }
+                            return reject;
+                        }
                     }
 
                     Text {
@@ -448,6 +505,7 @@ export component Canvas inherits Rectangle {
                     height: 100%;
                     visible: !root.markdown-mode;
                     edited => { root.text-edited(); }
+                    return-requested => { root.return-to-list(); }
                 }
 
                 markdown := MarkdownView {
@@ -471,6 +529,20 @@ export component Canvas inherits Rectangle {
                 ModeSwitcher {
                     markdown-selected: root.markdown-mode;
                     mode-selected(mode) => { root.mode-selected(mode); }
+                }
+
+                /* 保存状态：非阻塞文字提示（保存中 / 已保存 / 保存失败）。失败时用
+                   更重的字重与文案区分，不依赖颜色单独表达。 */
+                Text {
+                    visible: root.save-state >= 1 && root.save-state <= 3;
+                    text: root.save-state == 1
+                        ? Strings.save-saving
+                        : (root.save-state == 3 ? Strings.save-failed : Strings.save-saved);
+                    font-size: Theme.text-sm;
+                    font-weight: root.save-state == 3 ? 600 : 400;
+                    color: root.save-state == 3 ? Theme.ink : Theme.ink-2;
+                    vertical-alignment: center;
+                    overflow: elide;
                 }
 
                 /* 复制成功：轻量、非阻塞的短暂文字提示，不夺焦点。 */

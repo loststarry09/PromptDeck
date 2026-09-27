@@ -3,6 +3,7 @@ import { ListView } from "std-widgets.slint";
 import { Strings } from "strings.slint";
 import { AppIcon } from "icons.slint";
 import { TagChip } from "tagchip.slint";
+import { FocusRing } from "focusring.slint";
 
 export struct PromptRow {
     id: string,
@@ -19,6 +20,17 @@ component NewButton inherits FocusScope {
     out property <bool> hovering: touch.has-hover;
     height: 32px;
     min-width: 72px;
+
+    private property <bool> keyboard-focus: false;
+    focus-gained(reason) => { root.keyboard-focus = reason == FocusReason.tab-navigation; }
+    focus-lost => { root.keyboard-focus = false; }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == Key.Space) {
+            root.clicked();
+            return accept;
+        }
+        return reject;
+    }
 
     Rectangle {
         width: 100%;
@@ -55,15 +67,28 @@ component NewButton inherits FocusScope {
     touch := TouchArea {
         mouse-cursor: pointer;
         clicked => {
-            root.focus();
             root.clicked();
         }
+    }
+
+    /* accent 底上的主 CTA：焦点环改用 paper，保证与按钮底色对比可见。 */
+    FocusRing {
+        shown: root.keyboard-focus;
+        radius: Theme.radius-input;
+        ring-color: Theme.paper;
     }
 }
 
 component SearchField inherits Rectangle {
     in-out property <string> text <=> input.text;
     callback edited();
+    callback move-selection(delta: int);
+    callback open-selected();
+    callback escape();
+
+    public function focus-input() {
+        input.focus();
+    }
 
     height: 32px;
     border-radius: Theme.radius-input;
@@ -82,6 +107,22 @@ component SearchField inherits Rectangle {
         selection-foreground-color: Theme.ink;
         vertical-alignment: center;
         edited => { root.edited(); }
+        accepted => { root.open-selected(); }
+        key-pressed(event) => {
+            if (event.text == Key.DownArrow) {
+                root.move-selection(1);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                root.move-selection(-1);
+                return accept;
+            }
+            if (event.text == Key.Escape) {
+                root.escape();
+                return accept;
+            }
+            return reject;
+        }
     }
 
     Text {
@@ -150,21 +191,15 @@ component LibraryRow inherits Rectangle {
         background: Theme.rule;
     }
 
-    /* 行级点击面先声明，让行内标签 chip 的点击面叠在其上、优先响应。 */
+    /* 行级点击面先声明，让行内标签 chip 的点击面叠在其上、优先响应。
+       行不是 Tab 停靠点（列表选择走搜索框的 ↑/↓），避免无可见指示的焦点陷阱。 */
     touch := TouchArea {
         width: 100%;
         height: 100%;
         mouse-cursor: pointer;
         clicked => {
-            row-focus.focus();
             root.clicked();
         }
-    }
-
-    row-focus := FocusScope {
-        width: 100%;
-        height: 100%;
-        focus-on-click: false;
     }
 
     VerticalLayout {
@@ -273,11 +308,37 @@ export component LibraryPanel inherits Rectangle {
     in property <string> search-empty-title;
     in property <bool> library-empty;
     in property <string> tag-filter: "";
+    in property <int> focus-request: 0;
+    in property <int> selected-index: -1;
     callback new-prompt();
     callback select-prompt(id: string);
     callback search-edited();
     callback toggle-tag-filter(tag: string);
     callback clear-tag-filter();
+    callback move-selection(delta: int);
+    callback open-selected();
+
+    /* 列表行高：内容 54px + 分隔留白 8px（design-foundations）。 */
+    private property <length> row-height: 62px;
+
+    public function focus-search() {
+        search-field.focus-input();
+    }
+
+    changed focus-request => { root.focus-search(); }
+
+    /* 键盘选择后把选中行滚入可视区，长列表也能跟上。 */
+    changed selected-index => {
+        if (root.selected-index < 0 || list.height <= 0px) {
+            return;
+        }
+        let item-y = root.selected-index * root.row-height;
+        if (item-y < -list.content-y) {
+            list.content-y = -item-y;
+        } else if (item-y + root.row-height > -list.content-y + list.height) {
+            list.content-y = -(item-y + root.row-height - list.height);
+        }
+    }
 
     background: Theme.panel;
     border-radius: Theme.radius-panel;
@@ -308,9 +369,17 @@ export component LibraryPanel inherits Rectangle {
             }
         }
 
-        SearchField {
+        search-field := SearchField {
             text <=> root.search-query;
             edited => { root.search-edited(); }
+            move-selection(delta) => { root.move-selection(delta); }
+            open-selected => { root.open-selected(); }
+            escape => {
+                if (root.search-query != "") {
+                    root.search-query = "";
+                    root.search-edited();
+                }
+            }
         }
 
         if root.tag-filter != "" : HorizontalLayout {
@@ -366,7 +435,8 @@ export component LibraryPanel inherits Rectangle {
             hint: Strings.tag-empty-hint;
         }
 
-        if root.prompts.length > 0 : ListView {
+        list := ListView {
+            visible: root.prompts.length > 0;
             vertical-stretch: 1;
 
             for row in root.prompts : LibraryRow {
