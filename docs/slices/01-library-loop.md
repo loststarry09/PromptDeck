@@ -1,6 +1,6 @@
 # Slice 01 — Library 回路（tracer bullet）
 
-状态：已确认（2026-09-26），待排期实现。目标是端到端跑通最小闭环，并把外壳一次做对（基于 design.md tokens），避免二次美化。
+状态：**已完成（2026-09-27）**。工单 01–07 全部交付并通过双端（WSLg + Windows 原生）验收；详见 `docs/stage-01-handoff.md`。目标是端到端跑通最小闭环，并把外壳一次做对（基于 design.md tokens），避免二次美化。
 
 实现契约与工单见本地 tracker：`.scratch/slice-01-library-loop/spec.md` + `issues/01–07`（本地 markdown，未纳入 git）。
 

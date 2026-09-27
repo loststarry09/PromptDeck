@@ -34,8 +34,9 @@ crates/promptdeck-app    # Slint UI 与装配层；二进制名 promptdeck
 | `controller` | 把 core 操作映射为 Slint 属性/回调；持有列表模型、选中状态与按条目的画布模式 |
 | `markdown` | 把 core 的 Markdown 块映射为 Slint 块模型与 atom 字符区间；行内格式以 atom 属性表达（无 `StyledText`） |
 | `selection` | Markdown 只读选择模型：atom 几何收集、命中测试、选择规范化与文本提取（纯函数） |
+| `listnav` | 列表键盘导航的纯索引计算（`stepped_index`，`↑`/`↓` 越界收敛） |
 | `strings` | 中文文案集中管理，为 i18n 留位 |
-| `ui/*.slint` | `app.slint`（窗口）、`theme.slint`（tokens）、`shell/library/canvas/markdown` |
+| `ui/*.slint` | `app.slint`（窗口）、`theme.slint`（tokens）、`focusring.slint`（键盘可见焦点环）、`strings.slint`（UI 文案）、`icons.slint`、`shell/library/canvas/markdown` |
 
 ## 数据流与线程模型
 
@@ -61,7 +62,7 @@ Window
 ## 测试策略
 
 - core：内存 SQLite 单测（迁移、CRUD、搜索、修订去重）；变量解析表驱动测试；中文搜索用例。
-- app：双端构建验证 + WSLg / Windows GUI 冒烟；MVP 不引入 UI 自动化。
+- app：双端构建验证 + WSLg / Windows GUI 冒烟；MVP 不引入 UI 自动化。不新增 UI 测试 seam，但对纯函数助手允许单元测试（如 `listnav::stepped_index`，用键盘 `↑`/`↓` 的边界与流程）。
 - 每次提交门槛：`cargo fmt --check`、`cargo clippy --workspace --all-targets`（0 警告）、`cargo test --workspace`。
 
 ## 构建与运行
