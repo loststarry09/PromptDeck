@@ -27,6 +27,7 @@ pub const RAIL_EXPAND: &str = "展开侧栏";
 pub const RAIL_COLLAPSE: &str = "收起侧栏";
 pub const SEARCH_PLACEHOLDER: &str = "搜索标题与正文…";
 pub const EMPTY_SEARCH_HINT: &str = "换个关键词，或清空搜索查看全部";
+pub const COPY_DONE: &str = "已复制";
 
 pub fn install(ui: &AppWindow) {
     let strings = ui.global::<Strings>();
@@ -53,6 +54,7 @@ pub fn install(ui: &AppWindow) {
     strings.set_rail_collapse(RAIL_COLLAPSE.into());
     strings.set_search_placeholder(SEARCH_PLACEHOLDER.into());
     strings.set_empty_search_hint(EMPTY_SEARCH_HINT.into());
+    strings.set_copy_done(COPY_DONE.into());
 }
 
 pub fn empty_search_title(query: &str) -> String {

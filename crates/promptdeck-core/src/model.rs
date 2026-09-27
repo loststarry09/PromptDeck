@@ -60,6 +60,14 @@ pub struct Revision {
     pub created_at: i64,
 }
 
+/// A derived Variable definition parsed from a Prompt body: the name plus the
+/// default from its first occurrence (`None` when declared without a default).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableDef {
+    pub name: String,
+    pub default_value: Option<String>,
+}
+
 pub fn derive_title(body_md: &str) -> String {
     for line in body_md.lines() {
         let candidate = strip_heading(line.trim()).trim();

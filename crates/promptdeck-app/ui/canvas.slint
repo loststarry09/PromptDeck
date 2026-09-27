@@ -145,6 +145,7 @@ export component Canvas inherits Rectangle {
     in property <[MarkdownBlock]> markdown-blocks: [];
     in property <MarkdownSelection> markdown-selection;
     in-out property <int> markdown-geometry-tick: 0;
+    in property <bool> copy-feedback: false;
     in property <int> focus-request: 0;
     out property <bool> title-focused: title-input.has-focus;
     callback text-edited();
@@ -322,11 +323,21 @@ export component Canvas inherits Rectangle {
             }
 
             HorizontalLayout {
-                spacing: 0;
+                spacing: Theme.space-xs;
 
                 ModeSwitcher {
                     markdown-selected: root.markdown-mode;
                     mode-selected(mode) => { root.mode-selected(mode); }
+                }
+
+                /* 复制成功：轻量、非阻塞的短暂文字提示，不夺焦点。 */
+                Text {
+                    text: Strings.copy-done;
+                    opacity: root.copy-feedback ? 1 : 0;
+                    animate opacity { duration: Theme.dur-base; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                    color: Theme.ink-2;
+                    font-size: Theme.text-sm;
+                    vertical-alignment: center;
                 }
 
                 Rectangle { horizontal-stretch: 1; }

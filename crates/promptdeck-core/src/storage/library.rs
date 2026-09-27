@@ -6,8 +6,11 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::clock::{Clock, SystemClock};
 use crate::error::{Error, Result};
 use crate::id::{IdSource, UuidV7Ids};
-use crate::model::{Item, ItemKind, ItemSummary, Revision, content_hash, derive_title};
+use crate::model::{
+    Item, ItemKind, ItemSummary, Revision, VariableDef, content_hash, derive_title,
+};
 use crate::search::{self, QueryPlan};
+use crate::variables;
 
 pub const REVISION_WINDOW_MS: i64 = 10_000;
 pub const SETTING_THEME: &str = "theme";
@@ -57,6 +60,7 @@ impl Library {
     ) -> Result<Self> {
         crate::storage::migrate(&conn)?;
         ensure_fts_index(&conn)?;
+        backfill_variables(&conn)?;
         Ok(Self {
             conn,
             clock: Box::new(clock),
@@ -123,6 +127,7 @@ impl Library {
             params![title, body_md, now, id],
         )?;
         sync_fts(&transaction, id, &title, body_md)?;
+        sync_variables(&transaction, id, body_md)?;
 
         let latest: Option<(String, i64)> = transaction
             .query_row(
@@ -155,6 +160,25 @@ impl Library {
 
     pub fn load(&self, id: &str) -> Result<Option<Item>> {
         load_item(&self.conn, id)
+    }
+
+    /// The derived Variable definitions for an item, ordered by name.
+    pub fn variables(&self, id: &str) -> Result<Vec<VariableDef>> {
+        let mut statement = self.conn.prepare(
+            "SELECT name, default_value FROM variables WHERE item_id = ?1 ORDER BY name",
+        )?;
+        let rows = statement.query_map([id], |row| {
+            Ok(VariableDef {
+                name: row.get(0)?,
+                default_value: row.get(1)?,
+            })
+        })?;
+
+        let mut variables = Vec::new();
+        for row in rows {
+            variables.push(row?);
+        }
+        Ok(variables)
     }
 
     pub fn list_prompts(&self) -> Result<Vec<ItemSummary>> {
@@ -208,6 +232,7 @@ impl Library {
         }
 
         remove_fts(&transaction, id)?;
+        remove_variables(&transaction, id)?;
         transaction.commit()?;
         Ok(())
     }
@@ -368,6 +393,55 @@ fn sync_fts(conn: &Connection, id: &str, title: &str, body_md: &str) -> Result<(
         "INSERT INTO items_fts (rowid, title, body_md, item_id) VALUES (?1, ?2, ?3, ?4)",
         params![rowid, title, body_md, id],
     )?;
+    Ok(())
+}
+
+/// Replaces an item's derived Variable definitions from the body just written,
+/// so the table can never disagree with the text it describes.
+fn sync_variables(conn: &Connection, id: &str, body_md: &str) -> Result<()> {
+    remove_variables(conn, id)?;
+    for variable in variables::parse(body_md) {
+        conn.execute(
+            "INSERT INTO variables (item_id, name, default_value) VALUES (?1, ?2, ?3)",
+            params![id, variable.name, variable.default_value],
+        )?;
+    }
+    Ok(())
+}
+
+fn remove_variables(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM variables WHERE item_id = ?1", [id])?;
+    Ok(())
+}
+
+/// Databases written before the repository maintained `variables` have no
+/// derived definitions. Parse every live item that has none but whose body
+/// could hold a Variable, so the derived table matches the stored text.
+fn backfill_variables(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare(
+        "SELECT i.id, i.body_md FROM items i
+         WHERE i.deleted_at IS NULL
+           AND i.body_md LIKE '%{{%'
+           AND NOT EXISTS (SELECT 1 FROM variables v WHERE v.item_id = i.id)",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut pending = Vec::new();
+    for row in rows {
+        pending.push(row?);
+    }
+    drop(statement);
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let transaction = conn.unchecked_transaction()?;
+    for (id, body_md) in pending {
+        sync_variables(&transaction, &id, &body_md)?;
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -747,6 +821,116 @@ mod tests {
 
         let hits = library.search_prompts("翻译成").expect("search");
         assert_eq!(summary_ids(&hits).len(), 2);
+    }
+
+    fn variable(name: &str, default_value: Option<&str>) -> VariableDef {
+        VariableDef {
+            name: name.to_string(),
+            default_value: default_value.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn save_derives_variables_merging_duplicates() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+
+        library
+            .save(
+                &item.id,
+                "",
+                "请把 {{text:这段话}} 翻译成 {{lang}}，{{text:别的}}",
+            )
+            .expect("save");
+
+        assert_eq!(
+            library.variables(&item.id).expect("variables"),
+            vec![variable("lang", None), variable("text", Some("这段话"))]
+        );
+    }
+
+    #[test]
+    fn save_derives_empty_and_multiline_defaults() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+
+        library
+            .save(&item.id, "", "{{empty:}} 与 {{multi:第一行\n第二行}}")
+            .expect("save");
+
+        assert_eq!(
+            library.variables(&item.id).expect("variables"),
+            vec![
+                variable("empty", Some("")),
+                variable("multi", Some("第一行\n第二行")),
+            ]
+        );
+    }
+
+    #[test]
+    fn save_ignores_escaped_braces_when_deriving_variables() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+
+        library
+            .save(&item.id, "", r"\{{not-a-variable}} but {{real}}")
+            .expect("save");
+
+        assert_eq!(
+            library.variables(&item.id).expect("variables"),
+            vec![variable("real", None)]
+        );
+    }
+
+    #[test]
+    fn save_replaces_stale_variables() {
+        let (library, clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        library.save(&item.id, "", "{{old}}").expect("save old");
+        assert_eq!(library.variables(&item.id).expect("variables").len(), 1);
+
+        clock.advance(REVISION_WINDOW_MS);
+        library.save(&item.id, "", "没有变量了").expect("save new");
+
+        assert!(library.variables(&item.id).expect("variables").is_empty());
+    }
+
+    #[test]
+    fn soft_delete_clears_derived_variables() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        library.save(&item.id, "", "{{a:1}}").expect("save");
+
+        library.soft_delete(&item.id).expect("delete");
+
+        assert!(library.variables(&item.id).expect("variables").is_empty());
+    }
+
+    #[test]
+    fn opening_backfills_variables_for_pre_existing_items() {
+        let conn = crate::storage::open_in_memory().expect("open");
+        crate::storage::migrate(&conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO items (id, kind, title, body_md, created_at, updated_at)
+             VALUES ('legacy', 'prompt', '旧条目', '你好 {{name:世界}} {{keep}}', ?1, ?1)",
+            [T0],
+        )
+        .expect("insert legacy item");
+        conn.execute(
+            "INSERT INTO items (id, kind, title, body_md, created_at, updated_at)
+             VALUES ('plain', 'prompt', '无变量', '普通正文', ?1, ?1)",
+            [T0],
+        )
+        .expect("insert plain item");
+
+        let library =
+            Library::from_connection(conn, TestClock::new(T0), TestIds::new()).expect("library");
+
+        assert_eq!(
+            library.variables("legacy").expect("variables"),
+            vec![variable("keep", None), variable("name", Some("世界"))]
+        );
+        assert!(library.variables("plain").expect("variables").is_empty());
     }
 
     #[test]

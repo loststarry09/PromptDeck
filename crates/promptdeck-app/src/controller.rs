@@ -7,6 +7,7 @@ use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel, Weak};
 
 use promptdeck_core::error::Result as CoreResult;
 use promptdeck_core::storage::library::{Library, SETTING_RAIL_EXPANDED, SETTING_THEME};
+use promptdeck_core::variables;
 
 use crate::markdown;
 use crate::selection::{BlockInfo, Document, Position, Selection};
@@ -17,6 +18,8 @@ use crate::{AppWindow, MarkdownBlock, MarkdownSelection, PromptRow};
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
 /// 等布局稳定后再向 UI 取一次完整 atom 几何（首次渲染时 atom 可能尚未实例化）。
 const GEOMETRY_SETTLE_DELAY: Duration = Duration::from_millis(80);
+/// 复制成功提示的停留时长；到点自动淡出，无需用户操作。
+const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1600);
 
 /// 画布模式。Markdown 模式只读渲染；Source 模式是唯一可编辑面（ADR-0003）。
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -36,12 +39,21 @@ impl ViewMode {
     }
 }
 
+/// Writes plain text to the OS clipboard. Returns whether it succeeded, so
+/// callers can decide on feedback without leaking `arboard` types outward.
+fn copy_to_clipboard(text: &str) -> bool {
+    arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .is_ok()
+}
+
 pub struct Controller {
     library: Library,
     ui: Weak<AppWindow>,
     items: Rc<VecModel<PromptRow>>,
     save_timer: Timer,
     geometry_timer: Timer,
+    feedback_timer: Timer,
     dirty: Cell<bool>,
     active_id: RefCell<Option<String>>,
     modes: RefCell<HashMap<String, ViewMode>>,
@@ -69,6 +81,7 @@ impl Controller {
             items,
             save_timer: Timer::default(),
             geometry_timer: Timer::default(),
+            feedback_timer: Timer::default(),
             dirty: Cell::new(false),
             active_id: RefCell::new(None),
             modes: RefCell::new(HashMap::new()),
@@ -103,6 +116,22 @@ impl Controller {
                 },
             );
             controller.geometry_timer.stop();
+        }
+
+        {
+            let weak = Rc::downgrade(&controller);
+            controller.feedback_timer.start(
+                TimerMode::SingleShot,
+                COPY_FEEDBACK_DURATION,
+                move || {
+                    if let Some(controller) = weak.upgrade()
+                        && let Some(ui) = controller.ui.upgrade()
+                    {
+                        ui.set_copy_feedback(false);
+                    }
+                },
+            );
+            controller.feedback_timer.stop();
         }
 
         {
@@ -172,6 +201,10 @@ impl Controller {
         }
         {
             let controller = controller.clone();
+            ui.on_copy_resolved(move || controller.copy_resolved());
+        }
+        {
+            let controller = controller.clone();
             ui.on_select_all(move || controller.select_all());
         }
 
@@ -195,6 +228,7 @@ impl Controller {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+        self.clear_copy_feedback(&ui);
 
         match id {
             Some(id) => {
@@ -349,11 +383,35 @@ impl Controller {
             return;
         };
         let text = self.document.borrow().text(selection);
-        if text.is_empty() {
+        if !text.is_empty() {
+            let _ = copy_to_clipboard(&text);
+        }
+    }
+
+    /// `Ctrl+Shift+C`：复制默认值已填充的最终文本；无默认值的变量保持
+    /// `{{name}}` 原样，`\{{` 还原为字面 `{{`。成功后才给出轻量提示。
+    fn copy_resolved(&self) {
+        if self.active_id.borrow().is_none() {
             return;
         }
-        if let Ok(mut clipboard) = arboard::Clipboard::new() {
-            let _ = clipboard.set_text(text);
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let resolved = variables::resolve(&ui.get_body_text());
+        if resolved.is_empty() {
+            return;
+        }
+        if copy_to_clipboard(&resolved) {
+            ui.set_copy_feedback(true);
+            self.feedback_timer.restart();
+        }
+    }
+
+    /// 复制提示是瞬时的：切换条目时立即清掉，避免提示落在新条目上。
+    fn clear_copy_feedback(&self, ui: &AppWindow) {
+        self.feedback_timer.stop();
+        if ui.get_copy_feedback() {
+            ui.set_copy_feedback(false);
         }
     }
 
