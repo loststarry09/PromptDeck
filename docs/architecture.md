@@ -32,7 +32,8 @@ crates/promptdeck-app    # Slint UI 与装配层；二进制名 promptdeck
 |---|---|
 | `main` | 装配根：解析数据目录、打开并迁移数据库、构造控制器、运行窗口 |
 | `controller` | 把 core 操作映射为 Slint 属性/回调；持有列表模型、选中状态与按条目的画布模式 |
-| `markdown` | 把 core 的 Markdown 块映射为 Slint 块模型；行内用 `StyledText`，不支持语法降级纯文本 |
+| `markdown` | 把 core 的 Markdown 块映射为 Slint 块模型与 atom 字符区间；行内格式以 atom 属性表达（无 `StyledText`） |
+| `selection` | Markdown 只读选择模型：atom 几何收集、命中测试、选择规范化与文本提取（纯函数） |
 | `strings` | 中文文案集中管理，为 i18n 留位 |
 | `ui/*.slint` | `app.slint`（窗口）、`theme.slint`（tokens）、`shell/library/canvas/markdown` |
 

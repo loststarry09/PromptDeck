@@ -4,6 +4,7 @@ slint::include_modules!();
 
 mod controller;
 mod markdown;
+mod selection;
 mod strings;
 mod theme;
 

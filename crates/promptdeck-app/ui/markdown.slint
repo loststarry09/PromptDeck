@@ -1,7 +1,7 @@
 /* Hallmark · component: markdown-view · genre: modern-minimal
  * theme: studied-DNA (BlockHelm Workbench, design/design.md locked)
  * source: design/design.md semantic tokens via ui/theme.slint
- * states: read-only 渲染面（无交互态）；空文档渲染为空；超长/不支持语法在 app 层降级
+ * states: 只读渲染面；选择态背景用 Theme.selection（位于文字下方）；空文档渲染为空
  */
 
 import { Theme } from "theme.slint";
@@ -16,16 +16,173 @@ export enum MarkdownBlockKind {
     rule,
 }
 
+export enum MarkdownAtomKind {
+    text,
+    line-break,
+    blank-line,
+}
+
+export struct MarkdownAtom {
+    text: string,
+    kind: MarkdownAtomKind,
+    strong: bool,
+    emphasis: bool,
+    code: bool,
+    strike: bool,
+    link: bool,
+    underline: bool,
+    start: int,
+    end: int,
+}
+
 export struct MarkdownBlock {
     kind: MarkdownBlockKind,
     level: int,
     indent: int,
     marker: string,
-    text: styled-text,
+    atoms: [MarkdownAtom],
+    char-length: int,
+}
+
+export struct MarkdownSelection {
+    active: bool,
+    block-a: int,
+    off-a: int,
+    block-b: int,
+    off-b: int,
+}
+
+/* 单个 atom：文本单元或换行/空行占位。选择高亮绘制在文字下方。 */
+component AtomView inherits Rectangle {
+    in property <MarkdownAtom> atom;
+    in property <bool> selected: false;
+    in property <length> page-x: 0px;
+    in property <length> page-y: 0px;
+    in property <int> geometry-tick: 0;
+    in property <int> weight: 400;
+    in property <length> font-size: Theme.text-base;
+    in property <color> text-color: Theme.ink;
+    callback geometry(length, length, length, length);
+
+    private property <bool> is-break: atom.kind == MarkdownAtomKind.line-break;
+    private property <string> shown-text: atom.kind == MarkdownAtomKind.blank-line
+        ? " "
+        : atom.kind == MarkdownAtomKind.line-break
+            ? ""
+            : atom.text;
+    private property <color> glyph-color: atom.link ? Theme.accent : root.text-color;
+
+    width: root.is-break ? 10000px : label.preferred-width;
+    height: root.is-break ? 0px : label.preferred-height;
+    background: root.selected ? Theme.selection : transparent;
+
+    label := Text {
+        width: 100%;
+        height: 100%;
+        text: root.shown-text;
+        font-family: atom.code ? Theme.font-mono : Theme.font-body;
+        font-size: root.font-size;
+        font-weight: atom.strong ? 700 : root.weight;
+        font-italic: atom.emphasis;
+        color: root.glyph-color;
+        vertical-alignment: top;
+    }
+
+    if (atom.underline) : Rectangle {
+        y: parent.height - self.height;
+        width: 100%;
+        height: 1px;
+        background: root.glyph-color;
+    }
+
+    if (atom.strike) : Rectangle {
+        y: parent.height / 2;
+        width: 100%;
+        height: 1px;
+        background: root.glyph-color;
+    }
+
+    private property <length> content-x: self.absolute-position.x - root.page-x;
+    private property <length> content-y: self.absolute-position.y - root.page-y;
+    private property <length> last-x: -999999px;
+    private property <length> last-y: -999999px;
+    private property <length> last-w: -1px;
+    private property <length> last-h: -1px;
+
+    changed content-x => { root.maybe-report(); }
+    changed content-y => { root.maybe-report(); }
+    changed width => { root.maybe-report(); }
+    changed height => { root.maybe-report(); }
+    changed geometry-tick => { root.report(); }
+
+    public function maybe-report() {
+        if (content-x != last-x || content-y != last-y || self.width != last-w || self.height != last-h) {
+            last-x = content-x;
+            last-y = content-y;
+            last-w = self.width;
+            last-h = self.height;
+            root.report();
+        }
+    }
+
+    public function report() {
+        if (!root.is-break) {
+            root.geometry(root.content-x, root.content-y, root.width, root.height);
+        }
+    }
+}
+
+/* 一个块内的一行 atom 流：按 atom 边界换行。 */
+component AtomRow inherits FlexboxLayout {
+    in property <[MarkdownAtom]> atoms;
+    in property <int> block-index: 0;
+    in property <int> sel-start: -1;
+    in property <int> sel-end: -1;
+    in property <length> page-x: 0px;
+    in property <length> page-y: 0px;
+    in property <int> geometry-tick: 0;
+    in property <int> weight: 400;
+    in property <length> font-size: Theme.text-base;
+    in property <color> text-color: Theme.ink;
+    callback atom-geometry(int, int, length, length, length, length);
+
+    for atom[i] in root.atoms : AtomView {
+        atom: atom;
+        selected: root.sel-start >= 0 && atom.end > root.sel-start && atom.start < root.sel-end;
+        page-x: root.page-x;
+        page-y: root.page-y;
+        geometry-tick: root.geometry-tick;
+        weight: root.weight;
+        font-size: root.font-size;
+        text-color: root.text-color;
+        geometry(x, y, w, h) => {
+            root.atom-geometry(root.block-index, i, x, y, w, h);
+        }
+    }
 }
 
 component BlockView inherits Rectangle {
     in property <MarkdownBlock> block;
+    in property <int> block-index: 0;
+    in property <length> page-x: 0px;
+    in property <length> page-y: 0px;
+    in property <int> geometry-tick: 0;
+    in property <MarkdownSelection> selection;
+    callback atom-geometry(int, int, length, length, length, length);
+
+    private property <bool> has-selection: selection.active
+        && block-index >= selection.block-a
+        && block-index <= selection.block-b;
+    private property <int> sel-start: !has-selection
+        ? -1
+        : block-index == selection.block-a
+            ? selection.off-a
+            : 0;
+    private property <int> sel-end: !has-selection
+        ? -1
+        : block-index == selection.block-b
+            ? selection.off-b
+            : block.char-length;
 
     VerticalLayout {
         padding-top: block.kind == MarkdownBlockKind.heading
@@ -39,27 +196,39 @@ component BlockView inherits Rectangle {
                 ? Theme.space-xs
                 : Theme.space-3xs;
 
-        if block.kind == MarkdownBlockKind.heading : StyledText {
-            text: block.text;
-            default-font-family: Theme.font-body;
-            default-font-size: block.level == 1
+        if (block.kind == MarkdownBlockKind.heading) : AtomRow {
+            atoms: block.atoms;
+            block-index: root.block-index;
+            sel-start: root.sel-start;
+            sel-end: root.sel-end;
+            page-x: root.page-x;
+            page-y: root.page-y;
+            geometry-tick: root.geometry-tick;
+            weight: 700;
+            font-size: block.level == 1
                 ? Theme.text-lg
                 : block.level == 2
                     ? Theme.text-md
                     : Theme.text-base;
-            default-color: Theme.ink;
-            link-color: Theme.accent;
+            text-color: Theme.ink;
+            atom-geometry(b, a, x, y, w, h) => { root.atom-geometry(b, a, x, y, w, h); }
         }
 
-        if block.kind == MarkdownBlockKind.paragraph : StyledText {
-            text: block.text;
-            default-font-family: Theme.font-body;
-            default-font-size: Theme.text-base;
-            default-color: Theme.ink;
-            link-color: Theme.accent;
+        if (block.kind == MarkdownBlockKind.paragraph) : AtomRow {
+            atoms: block.atoms;
+            block-index: root.block-index;
+            sel-start: root.sel-start;
+            sel-end: root.sel-end;
+            page-x: root.page-x;
+            page-y: root.page-y;
+            geometry-tick: root.geometry-tick;
+            weight: 400;
+            font-size: Theme.text-base;
+            text-color: Theme.ink;
+            atom-geometry(b, a, x, y, w, h) => { root.atom-geometry(b, a, x, y, w, h); }
         }
 
-        if block.kind == MarkdownBlockKind.list-item : HorizontalLayout {
+        if (block.kind == MarkdownBlockKind.list-item) : HorizontalLayout {
             padding-left: block.indent * Theme.space-sm;
             spacing: Theme.space-2xs;
 
@@ -73,17 +242,23 @@ component BlockView inherits Rectangle {
                 color: Theme.ink-muted;
             }
 
-            StyledText {
+            AtomRow {
                 horizontal-stretch: 1;
-                text: block.text;
-                default-font-family: Theme.font-body;
-                default-font-size: Theme.text-base;
-                default-color: Theme.ink;
-                link-color: Theme.accent;
+                atoms: block.atoms;
+                block-index: root.block-index;
+                sel-start: root.sel-start;
+                sel-end: root.sel-end;
+                page-x: root.page-x;
+                page-y: root.page-y;
+                geometry-tick: root.geometry-tick;
+                weight: 400;
+                font-size: Theme.text-base;
+                text-color: Theme.ink;
+                atom-geometry(b, a, x, y, w, h) => { root.atom-geometry(b, a, x, y, w, h); }
             }
         }
 
-        if block.kind == MarkdownBlockKind.quote : HorizontalLayout {
+        if (block.kind == MarkdownBlockKind.quote) : HorizontalLayout {
             spacing: Theme.space-xs;
 
             Rectangle {
@@ -93,17 +268,23 @@ component BlockView inherits Rectangle {
                 background: Theme.rule-strong;
             }
 
-            StyledText {
+            AtomRow {
                 horizontal-stretch: 1;
-                text: block.text;
-                default-font-family: Theme.font-body;
-                default-font-size: Theme.text-base;
-                default-color: Theme.ink-2;
-                link-color: Theme.accent;
+                atoms: block.atoms;
+                block-index: root.block-index;
+                sel-start: root.sel-start;
+                sel-end: root.sel-end;
+                page-x: root.page-x;
+                page-y: root.page-y;
+                geometry-tick: root.geometry-tick;
+                weight: 400;
+                font-size: Theme.text-base;
+                text-color: Theme.ink-2;
+                atom-geometry(b, a, x, y, w, h) => { root.atom-geometry(b, a, x, y, w, h); }
             }
         }
 
-        if block.kind == MarkdownBlockKind.code : Rectangle {
+        if (block.kind == MarkdownBlockKind.code) : Rectangle {
             background: Theme.control;
             border-radius: Theme.radius-input;
             clip: true;
@@ -112,16 +293,23 @@ component BlockView inherits Rectangle {
                 width: 100%;
                 padding: Theme.space-xs;
 
-                StyledText {
-                    text: block.text;
-                    default-font-family: Theme.font-mono;
-                    default-font-size: Theme.text-sm;
-                    default-color: Theme.ink;
+                AtomRow {
+                    atoms: block.atoms;
+                    block-index: root.block-index;
+                    sel-start: root.sel-start;
+                    sel-end: root.sel-end;
+                    page-x: root.page-x;
+                    page-y: root.page-y;
+                    geometry-tick: root.geometry-tick;
+                    weight: 400;
+                    font-size: Theme.text-sm;
+                    text-color: Theme.ink;
+                    atom-geometry(b, a, x, y, w, h) => { root.atom-geometry(b, a, x, y, w, h); }
                 }
             }
         }
 
-        if block.kind == MarkdownBlockKind.rule : Rectangle {
+        if (block.kind == MarkdownBlockKind.rule) : Rectangle {
             height: 1px;
             background: Theme.rule-strong;
         }
@@ -130,14 +318,24 @@ component BlockView inherits Rectangle {
 
 export component MarkdownView inherits Rectangle {
     in property <[MarkdownBlock]> blocks: [];
+    in property <MarkdownSelection> selection;
+    in-out property <int> geometry-tick: 0;
 
     out property <length> max-scroll: max(0px, scroll.content-height - scroll.visible-height);
     out property <float> scroll-fraction: root.max-scroll <= 0px
         ? 0
         : clamp(-scroll.content-y / root.max-scroll, 0, 1);
 
+    callback atom-geometry(block: int, atom: int, x: length, y: length, w: length, h: length);
+    callback pointer-pressed(x: float, y: float);
+    callback pointer-moved(x: float, y: float);
+    callback pointer-released();
+    callback pointer-double-clicked(x: float, y: float);
+
     clip: true;
     background: transparent;
+
+    changed width => { root.geometry-tick += 1; }
 
     public function scroll-to-fraction(fraction: float) {
         scroll.content-y = -fraction * root.max-scroll;
@@ -159,8 +357,43 @@ export component MarkdownView inherits Rectangle {
             width: parent.width;
             spacing: 0;
 
-            for block in root.blocks : BlockView {
+            for block[bi] in root.blocks : BlockView {
                 block: block;
+                block-index: bi;
+                page-x: page.absolute-position.x;
+                page-y: page.absolute-position.y;
+                geometry-tick: root.geometry-tick;
+                selection: root.selection;
+                atom-geometry(b, a, x, y, w, h) => { root.atom-geometry(b, a, x, y, w, h); }
+            }
+        }
+
+        /* 选择层：内容之上、与内容同尺寸；滚轮显式拒绝以便 ScrollView 处理。 */
+        touch := TouchArea {
+            x: 0;
+            y: 0;
+            width: page.width;
+            height: page.height;
+            mouse-cursor: text;
+
+            scroll-event(event) => {
+                return EventResult.reject;
+            }
+
+            pointer-event(event) => {
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.down) {
+                    root.pointer-pressed(touch.mouse-x / 1px, touch.mouse-y / 1px);
+                }
+                if (event.kind == PointerEventKind.move && touch.pressed) {
+                    root.pointer-moved(touch.mouse-x / 1px, touch.mouse-y / 1px);
+                }
+                if (event.button == PointerEventButton.left && event.kind == PointerEventKind.up) {
+                    root.pointer-released();
+                }
+            }
+
+            double-clicked => {
+                root.pointer-double-clicked(touch.mouse-x / 1px, touch.mouse-y / 1px);
             }
         }
     }

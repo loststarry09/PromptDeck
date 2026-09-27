@@ -387,6 +387,564 @@ fn collect_fenced_code(lines: &[&str], mut i: usize, fence: &Fence) -> (String, 
     (lines[start..].join("\n"), lines.len())
 }
 
+/// 行内样式标志，可组合。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InlineStyle {
+    pub strong: bool,
+    pub emphasis: bool,
+    pub code: bool,
+    pub strike: bool,
+    pub link: bool,
+    pub underline: bool,
+}
+
+/// 行内片段：渲染文本（不含 Markdown 标记）与样式。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineSpan {
+    pub text: String,
+    pub style: InlineStyle,
+}
+
+/// atom 类型：文本、换行（`\n`）、空行（代码块中连续的换行之间的空行）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomKind {
+    Text,
+    LineBreak,
+    BlankLine,
+}
+
+/// 可渲染 / 可选择的最小单元。
+///
+/// `start`/`end` 是块内渲染文本的字符偏移。文本 atom 的 `text` 可能包含不
+/// 计入 `[start, end)` 的尾随空白（空白跟随前一个 atom 参与换行，避免行首出现
+/// 隐形空格）；空行 atom 的 `start == end`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Atom {
+    pub text: String,
+    pub style: InlineStyle,
+    pub kind: AtomKind,
+    pub start: usize,
+    pub end: usize,
+}
+
+/// 单个 atom 的最大字符数（超长 token 允许在中间换行，避免溢出画布）。
+pub const MAX_ATOM_CHARS: usize = 16;
+
+/// 宽字符（CJK、假名、谚文、全角等）：逐字成 atom，可任意换行。
+pub fn is_wide_char(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11FF}'
+            | '\u{2E80}'..='\u{2FFF}'
+            | '\u{3000}'..='\u{303F}'
+            | '\u{3040}'..='\u{30FF}'
+            | '\u{3100}'..='\u{312F}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{31C0}'..='\u{31EF}'
+            | '\u{3200}'..='\u{32FF}'
+            | '\u{3400}'..='\u{4DBF}'
+            | '\u{4E00}'..='\u{9FFF}'
+            | '\u{A960}'..='\u{A97F}'
+            | '\u{AC00}'..='\u{D7AF}'
+            | '\u{F900}'..='\u{FAFF}'
+            | '\u{FE30}'..='\u{FE4F}'
+            | '\u{FF00}'..='\u{FFEF}'
+            | '\u{20000}'..='\u{2FA1F}'
+    )
+}
+
+/// 解析行内 Markdown 为渲染片段。
+///
+/// 支持的子集：`**strong**`/`__strong__`、`*em*`/`_em_`、`` `code` ``、
+/// `~~strike~~`、`[text](url)`、`<u>underline</u>`、`\` 转义。未闭合或无法
+/// 识别时保留字面文本；图片语法与未知 HTML 标签按字面保留。
+pub fn parse_inlines(text: &str) -> Vec<InlineSpan> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut spans = Vec::new();
+    parse_span_range(&chars, 0, chars.len(), InlineStyle::default(), &mut spans);
+    merge_spans(spans)
+}
+
+fn merge_spans(spans: Vec<InlineSpan>) -> Vec<InlineSpan> {
+    let mut merged: Vec<InlineSpan> = Vec::with_capacity(spans.len());
+    for span in spans {
+        if span.text.is_empty() {
+            continue;
+        }
+        if let Some(last) = merged.last_mut()
+            && last.style == span.style
+        {
+            last.text.push_str(&span.text);
+            continue;
+        }
+        merged.push(span);
+    }
+    merged
+}
+
+fn push_span(out: &mut Vec<InlineSpan>, text: String, style: InlineStyle) {
+    if !text.is_empty() {
+        out.push(InlineSpan { text, style });
+    }
+}
+
+fn parse_span_range(
+    chars: &[char],
+    start: usize,
+    end: usize,
+    style: InlineStyle,
+    out: &mut Vec<InlineSpan>,
+) {
+    let mut literal = String::new();
+    let mut i = start;
+    while i < end {
+        let c = chars[i];
+
+        if c == '\\' && i + 1 < end && chars[i + 1].is_ascii_punctuation() {
+            literal.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+
+        if c == '`' {
+            let run = run_length(chars, i, end, '`');
+            if let Some(close) = find_exact_run(chars, i + run, end, '`', run) {
+                let content: String = chars[i + run..close].iter().collect();
+                push_span(out, literal.clone(), style);
+                literal.clear();
+                push_span(
+                    out,
+                    trim_code_span(content),
+                    InlineStyle {
+                        code: true,
+                        ..style
+                    },
+                );
+                i = close + run;
+                continue;
+            }
+            for _ in 0..run {
+                literal.push('`');
+            }
+            i += run;
+            continue;
+        }
+
+        if c == '<' {
+            if let Some(inner_end) = tag_end(chars, i, end, "u")
+                && let Some(close) = find_tag(chars, inner_end, end, "u")
+            {
+                push_span(out, literal.clone(), style);
+                literal.clear();
+                parse_span_range(
+                    chars,
+                    inner_end,
+                    close,
+                    InlineStyle {
+                        underline: true,
+                        ..style
+                    },
+                    out,
+                );
+                i = close + 4;
+                continue;
+            }
+            if let Some(skip) = font_tag_length(chars, i, end) {
+                i += skip;
+                continue;
+            }
+            literal.push(c);
+            i += 1;
+            continue;
+        }
+
+        if c == '!' && i + 1 < end && chars[i + 1] == '[' {
+            if let Some((_text_end, url_end)) = link_bounds(chars, i + 1, end) {
+                for ch in &chars[i..url_end] {
+                    literal.push(*ch);
+                }
+                i = url_end;
+                continue;
+            }
+            literal.push('!');
+            i += 1;
+            continue;
+        }
+
+        if c == '[' {
+            if let Some((text_end, url_end)) = link_bounds(chars, i, end) {
+                push_span(out, literal.clone(), style);
+                literal.clear();
+                parse_span_range(
+                    chars,
+                    i + 1,
+                    text_end,
+                    InlineStyle {
+                        link: true,
+                        ..style
+                    },
+                    out,
+                );
+                i = url_end;
+                continue;
+            }
+            literal.push('[');
+            i += 1;
+            continue;
+        }
+
+        if c == '*' || c == '_' || c == '~' {
+            let run = run_length(chars, i, end, c);
+            if let Some((open_len, mut inner_style, close_len)) = delimiter(c, run, chars, i, start)
+                && let Some(close) = find_delimiter_close(chars, i + open_len, end, c, open_len)
+            {
+                inner_style.strong |= style.strong;
+                inner_style.emphasis |= style.emphasis;
+                inner_style.strike |= style.strike;
+                inner_style.code |= style.code;
+                inner_style.link |= style.link;
+                inner_style.underline |= style.underline;
+                push_span(out, literal.clone(), style);
+                literal.clear();
+                parse_span_range(chars, i + open_len, close, inner_style, out);
+                i = close + close_len;
+                continue;
+            }
+            for _ in 0..run {
+                literal.push(c);
+            }
+            i += run;
+            continue;
+        }
+
+        literal.push(c);
+        i += 1;
+    }
+    push_span(out, literal, style);
+}
+
+fn trim_code_span(content: String) -> String {
+    let all_spaces = !content.is_empty() && content.chars().all(|c| c == ' ');
+    if content.len() >= 2 && content.starts_with(' ') && content.ends_with(' ') && !all_spaces {
+        return content[1..content.len() - 1].to_string();
+    }
+    content
+}
+
+fn run_length(chars: &[char], from: usize, end: usize, ch: char) -> usize {
+    chars[from..end].iter().take_while(|c| **c == ch).count()
+}
+
+fn find_exact_run(chars: &[char], from: usize, end: usize, ch: char, len: usize) -> Option<usize> {
+    let mut i = from;
+    while i < end {
+        if chars[i] == ch {
+            let run = run_length(chars, i, end, ch);
+            if run == len {
+                return Some(i);
+            }
+            i += run;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn tag_end(chars: &[char], from: usize, end: usize, name: &str) -> Option<usize> {
+    let expected: Vec<char> = format!("<{name}>").chars().collect();
+    if from + expected.len() > end || chars[from..from + expected.len()] != expected[..] {
+        return None;
+    }
+    Some(from + expected.len())
+}
+
+fn find_tag(chars: &[char], from: usize, end: usize, name: &str) -> Option<usize> {
+    let expected: Vec<char> = format!("</{name}>").chars().collect();
+    let mut i = from;
+    while i + expected.len() <= end {
+        if chars[i..i + expected.len()] == expected[..] {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn font_tag_length(chars: &[char], from: usize, end: usize) -> Option<usize> {
+    let rest = &chars[from..end];
+    let closing = rest.starts_with(&['<', '/', 'f', 'o', 'n', 't']);
+    let opening = rest.starts_with(&['<', 'f', 'o', 'n', 't']);
+    if !closing && !opening {
+        return None;
+    }
+    if opening && !closing && rest.get(5).is_some_and(|c| !c.is_whitespace() && *c != '>') {
+        return None;
+    }
+    rest.iter().position(|c| *c == '>').map(|p| p + 1)
+}
+
+fn link_bounds(chars: &[char], open: usize, end: usize) -> Option<(usize, usize)> {
+    if chars.get(open) != Some(&'[') {
+        return None;
+    }
+    let text_end = (open + 1..end).find(|i| chars[*i] == ']')?;
+    if chars.get(text_end + 1) != Some(&'(') {
+        return None;
+    }
+    let url_end = (text_end + 2..end).find(|i| chars[*i] == ')')?;
+    Some((text_end, url_end + 1))
+}
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || is_wide_char(c)
+}
+
+fn delimiter(
+    c: char,
+    run: usize,
+    chars: &[char],
+    i: usize,
+    start: usize,
+) -> Option<(usize, InlineStyle, usize)> {
+    match c {
+        '*' => match run {
+            1 => Some((
+                1,
+                InlineStyle {
+                    emphasis: true,
+                    ..Default::default()
+                },
+                1,
+            )),
+            _ => {
+                let len = run.min(3);
+                let style = match len {
+                    2 => InlineStyle {
+                        strong: true,
+                        ..Default::default()
+                    },
+                    _ => InlineStyle {
+                        strong: true,
+                        emphasis: true,
+                        ..Default::default()
+                    },
+                };
+                Some((len, style, len))
+            }
+        },
+        '_' => {
+            if i > start
+                && chars
+                    .get(i.wrapping_sub(1))
+                    .is_some_and(|p| is_word_char(*p))
+            {
+                return None;
+            }
+            match run {
+                1 => Some((
+                    1,
+                    InlineStyle {
+                        emphasis: true,
+                        ..Default::default()
+                    },
+                    1,
+                )),
+                _ => {
+                    let len = run.min(3);
+                    let style = match len {
+                        2 => InlineStyle {
+                            strong: true,
+                            ..Default::default()
+                        },
+                        _ => InlineStyle {
+                            strong: true,
+                            emphasis: true,
+                            ..Default::default()
+                        },
+                    };
+                    Some((len, style, len))
+                }
+            }
+        }
+        '~' if run >= 2 => Some((
+            2,
+            InlineStyle {
+                strike: true,
+                ..Default::default()
+            },
+            2,
+        )),
+        _ => None,
+    }
+}
+
+fn find_delimiter_close(
+    chars: &[char],
+    from: usize,
+    end: usize,
+    c: char,
+    open_len: usize,
+) -> Option<usize> {
+    let mut i = from;
+    while i < end {
+        if chars[i] != c {
+            i += 1;
+            continue;
+        }
+        let run = run_length(chars, i, end, c);
+        let matches = match c {
+            '_' => {
+                run >= open_len
+                    && chars.get(i + run).is_none_or(|next| !is_word_char(*next))
+                    && (open_len == 1 || run == open_len)
+            }
+            _ => run == open_len || (open_len >= 2 && run >= open_len),
+        };
+        if matches {
+            return Some(i);
+        }
+        i += run;
+    }
+    None
+}
+
+/// 把行内片段拆成 atom（块内字符偏移连续）。
+pub fn atomize_spans(spans: &[InlineSpan]) -> Vec<Atom> {
+    let mut atoms = Vec::new();
+    let mut pos = 0usize;
+    for span in spans {
+        atomize_span(span, &mut pos, &mut atoms);
+    }
+    atoms
+}
+
+fn atomize_span(span: &InlineSpan, pos: &mut usize, atoms: &mut Vec<Atom>) {
+    let chars: Vec<char> = span.text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\n' {
+            atoms.push(Atom {
+                text: "\n".to_string(),
+                style: span.style,
+                kind: AtomKind::LineBreak,
+                start: *pos + i,
+                end: *pos + i + 1,
+            });
+            i += 1;
+            continue;
+        }
+        if c.is_whitespace() {
+            let ws_start = i;
+            while i < chars.len() && chars[i].is_whitespace() && chars[i] != '\n' {
+                i += 1;
+            }
+            let ws: String = chars[ws_start..i].iter().collect();
+            match atoms.last_mut() {
+                Some(last) if last.kind == AtomKind::Text => last.text.push_str(&ws),
+                _ => atoms.push(Atom {
+                    text: ws,
+                    style: span.style,
+                    kind: AtomKind::Text,
+                    start: *pos + ws_start,
+                    end: *pos + i,
+                }),
+            }
+            continue;
+        }
+        if span.style.code || is_wide_char(c) {
+            atoms.push(Atom {
+                text: c.to_string(),
+                style: span.style,
+                kind: AtomKind::Text,
+                start: *pos + i,
+                end: *pos + i + 1,
+            });
+            i += 1;
+            continue;
+        }
+        let run_start = i;
+        while i < chars.len()
+            && !chars[i].is_whitespace()
+            && chars[i] != '\n'
+            && !is_wide_char(chars[i])
+            && !span.style.code
+        {
+            i += 1;
+        }
+        let run_len = i - run_start;
+        let mut k = 0;
+        while k < run_len {
+            let take = (run_len - k).min(MAX_ATOM_CHARS);
+            let text: String = chars[run_start + k..run_start + k + take].iter().collect();
+            atoms.push(Atom {
+                text,
+                style: span.style,
+                kind: AtomKind::Text,
+                start: *pos + run_start + k,
+                end: *pos + run_start + k + take,
+            });
+            k += take;
+        }
+    }
+    *pos += chars.len();
+}
+
+/// 代码块 atom 化：逐字（等宽字体无需保字距），保留换行与空行。
+pub fn atomize_code(text: &str) -> Vec<Atom> {
+    let style = InlineStyle {
+        code: true,
+        ..Default::default()
+    };
+    let chars: Vec<char> = text.chars().collect();
+    let mut atoms = Vec::new();
+    let mut line_start = 0usize;
+    for i in 0..=chars.len() {
+        if i == chars.len() {
+            if i > line_start {
+                for (k, c) in chars.iter().enumerate().take(i).skip(line_start) {
+                    atoms.push(code_char_atom(*c, style, k));
+                }
+            }
+            break;
+        }
+        if chars[i] == '\n' {
+            if i == line_start {
+                atoms.push(Atom {
+                    text: String::new(),
+                    style,
+                    kind: AtomKind::BlankLine,
+                    start: i,
+                    end: i,
+                });
+            } else {
+                for (k, c) in chars.iter().enumerate().take(i).skip(line_start) {
+                    atoms.push(code_char_atom(*c, style, k));
+                }
+            }
+            atoms.push(Atom {
+                text: "\n".to_string(),
+                style,
+                kind: AtomKind::LineBreak,
+                start: i,
+                end: i + 1,
+            });
+            line_start = i + 1;
+        }
+    }
+    atoms
+}
+
+fn code_char_atom(c: char, style: InlineStyle, index: usize) -> Atom {
+    Atom {
+        text: c.to_string(),
+        style,
+        kind: AtomKind::Text,
+        start: index,
+        end: index + 1,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +1219,408 @@ mod tests {
                 code("hello"),
                 Block::Rule,
                 paragraph("结束。"),
+            ]
+        );
+    }
+}
+
+#[cfg(test)]
+mod inline_tests {
+    use super::*;
+
+    fn style_strong() -> InlineStyle {
+        InlineStyle {
+            strong: true,
+            ..Default::default()
+        }
+    }
+
+    fn style_emphasis() -> InlineStyle {
+        InlineStyle {
+            emphasis: true,
+            ..Default::default()
+        }
+    }
+
+    fn style_code() -> InlineStyle {
+        InlineStyle {
+            code: true,
+            ..Default::default()
+        }
+    }
+
+    fn span(text: &str, style: InlineStyle) -> InlineSpan {
+        InlineSpan {
+            text: text.into(),
+            style,
+        }
+    }
+
+    fn text_atom(text: &str, start: usize, end: usize) -> Atom {
+        Atom {
+            text: text.into(),
+            style: Default::default(),
+            kind: AtomKind::Text,
+            start,
+            end,
+        }
+    }
+
+    #[test]
+    fn plain_text_is_one_span() {
+        assert_eq!(
+            parse_inlines("hello world"),
+            vec![span("hello world", Default::default())]
+        );
+    }
+
+    #[test]
+    fn empty_text_has_no_spans() {
+        assert_eq!(parse_inlines(""), vec![]);
+    }
+
+    #[test]
+    fn strong_and_emphasis_are_parsed() {
+        assert_eq!(
+            parse_inlines("**bold**"),
+            vec![span("bold", style_strong())]
+        );
+        assert_eq!(
+            parse_inlines("__bold__"),
+            vec![span("bold", style_strong())]
+        );
+        assert_eq!(parse_inlines("*em*"), vec![span("em", style_emphasis())]);
+        assert_eq!(parse_inlines("_em_"), vec![span("em", style_emphasis())]);
+        assert_eq!(
+            parse_inlines("***both***"),
+            vec![span(
+                "both",
+                InlineStyle {
+                    strong: true,
+                    emphasis: true,
+                    ..Default::default()
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn nested_emphasis_works() {
+        assert_eq!(
+            parse_inlines("*a **b** c*"),
+            vec![
+                span("a ", style_emphasis()),
+                span(
+                    "b",
+                    InlineStyle {
+                        emphasis: true,
+                        strong: true,
+                        ..Default::default()
+                    }
+                ),
+                span(" c", style_emphasis()),
+            ]
+        );
+        assert_eq!(
+            parse_inlines("**a *b* c**"),
+            vec![
+                span("a ", style_strong()),
+                span(
+                    "b",
+                    InlineStyle {
+                        strong: true,
+                        emphasis: true,
+                        ..Default::default()
+                    }
+                ),
+                span(" c", style_strong()),
+            ]
+        );
+    }
+
+    #[test]
+    fn intraword_underscores_stay_literal() {
+        assert_eq!(
+            parse_inlines("foo_bar_baz"),
+            vec![span("foo_bar_baz", Default::default())]
+        );
+    }
+
+    #[test]
+    fn unmatched_delimiters_stay_literal() {
+        assert_eq!(
+            parse_inlines("a * b"),
+            vec![span("a * b", Default::default())]
+        );
+        assert_eq!(
+            parse_inlines("**open"),
+            vec![span("**open", Default::default())]
+        );
+        assert_eq!(
+            parse_inlines("~single~"),
+            vec![span("~single~", Default::default())]
+        );
+    }
+
+    #[test]
+    fn strikethrough_is_parsed() {
+        assert_eq!(
+            parse_inlines("~~gone~~"),
+            vec![span(
+                "gone",
+                InlineStyle {
+                    strike: true,
+                    ..Default::default()
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn code_spans_are_literal() {
+        assert_eq!(parse_inlines("`**x**`"), vec![span("**x**", style_code())]);
+        assert_eq!(parse_inlines("``a`b``"), vec![span("a`b", style_code())]);
+        assert_eq!(
+            parse_inlines("`unclosed"),
+            vec![span("`unclosed", Default::default())]
+        );
+    }
+
+    #[test]
+    fn links_are_parsed_and_images_stay_literal() {
+        assert_eq!(
+            parse_inlines("[docs](https://example.com)"),
+            vec![span(
+                "docs",
+                InlineStyle {
+                    link: true,
+                    ..Default::default()
+                }
+            )]
+        );
+        assert_eq!(
+            parse_inlines("![alt](a.png)"),
+            vec![span("![alt](a.png)", Default::default())]
+        );
+        assert_eq!(
+            parse_inlines("[not a link]"),
+            vec![span("[not a link]", Default::default())]
+        );
+    }
+
+    #[test]
+    fn escapes_remove_the_backslash() {
+        assert_eq!(
+            parse_inlines("\\*not em\\*"),
+            vec![span("*not em*", Default::default())]
+        );
+        assert_eq!(
+            parse_inlines("a\\\\b"),
+            vec![span("a\\b", Default::default())]
+        );
+    }
+
+    #[test]
+    fn underline_tags_are_parsed_and_font_tags_stripped() {
+        assert_eq!(
+            parse_inlines("<u>under</u>"),
+            vec![span(
+                "under",
+                InlineStyle {
+                    underline: true,
+                    ..Default::default()
+                }
+            )]
+        );
+        assert_eq!(
+            parse_inlines("<font color=\"red\">x</font>"),
+            vec![span("x", Default::default())]
+        );
+        assert_eq!(
+            parse_inlines("<span>x</span>"),
+            vec![span("<span>x</span>", Default::default())]
+        );
+    }
+
+    #[test]
+    fn mixed_inline_markup_round_trips_offsets() {
+        let spans = parse_inlines("前 **粗** 后");
+        assert_eq!(
+            spans,
+            vec![
+                span("前 ", Default::default()),
+                span("粗", style_strong()),
+                span(" 后", Default::default()),
+            ]
+        );
+        let atoms = atomize_spans(&spans);
+        assert_eq!(atoms[0], text_atom("前 ", 0, 1));
+        assert_eq!(
+            atoms[1],
+            Atom {
+                text: "粗 ".into(),
+                style: style_strong(),
+                kind: AtomKind::Text,
+                start: 2,
+                end: 3
+            }
+        );
+        assert_eq!(atoms[2], text_atom("后", 4, 5));
+    }
+
+    #[test]
+    fn latin_words_keep_kerning_friendly_atoms() {
+        assert_eq!(
+            atomize_spans(&parse_inlines("hello world")),
+            vec![text_atom("hello ", 0, 5), text_atom("world", 6, 11)]
+        );
+    }
+
+    #[test]
+    fn wide_chars_are_one_atom_each() {
+        assert_eq!(
+            atomize_spans(&parse_inlines("你好世界")),
+            vec![
+                text_atom("你", 0, 1),
+                text_atom("好", 1, 2),
+                text_atom("世", 2, 3),
+                text_atom("界", 3, 4),
+            ]
+        );
+    }
+
+    #[test]
+    fn mixed_wide_and_latin_splits_at_boundaries() {
+        let atoms = atomize_spans(&parse_inlines("使用 Ctrl+M 切换"));
+        let texts: Vec<_> = atoms.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(texts, vec!["使", "用 ", "Ctrl+M ", "切", "换"]);
+        assert_eq!(atoms[2].start, 3);
+        assert_eq!(atoms[2].end, 9);
+        assert_eq!(atoms[3].start, 10);
+        assert_eq!(atoms[3].end, 11);
+        assert_eq!(atoms[4].start, 11);
+        assert_eq!(atoms[4].end, 12);
+    }
+
+    #[test]
+    fn long_latin_runs_are_chunked_for_wrapping() {
+        let atoms = atomize_spans(&parse_inlines("abcdefghijklmnopqrs"));
+        assert_eq!(atoms.len(), 2);
+        assert_eq!(atoms[0].text, "abcdefghijklmnop");
+        assert_eq!(atoms[0].start, 0);
+        assert_eq!(atoms[0].end, 16);
+        assert_eq!(atoms[1].text, "qrs");
+        assert_eq!(atoms[1].start, 16);
+        assert_eq!(atoms[1].end, 19);
+    }
+
+    #[test]
+    fn newlines_become_break_atoms() {
+        let atoms = atomize_spans(&parse_inlines("a\nb"));
+        assert_eq!(
+            atoms,
+            vec![
+                text_atom("a", 0, 1),
+                Atom {
+                    text: "\n".into(),
+                    style: Default::default(),
+                    kind: AtomKind::LineBreak,
+                    start: 1,
+                    end: 2
+                },
+                text_atom("b", 2, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn inline_code_is_atomized_per_char() {
+        let atoms = atomize_spans(&parse_inlines("a `bc` d"));
+        let texts: Vec<_> = atoms.iter().map(|a| a.text.as_str()).collect();
+        assert_eq!(texts, vec!["a ", "b", "c ", "d"]);
+        assert_eq!(atoms[1].start, 2);
+        assert_eq!(atoms[2].start, 3);
+    }
+
+    #[test]
+    fn code_blocks_keep_blank_lines() {
+        assert_eq!(
+            atomize_code("a\n\nb"),
+            vec![
+                Atom {
+                    text: "a".into(),
+                    style: style_code(),
+                    kind: AtomKind::Text,
+                    start: 0,
+                    end: 1
+                },
+                Atom {
+                    text: "\n".into(),
+                    style: style_code(),
+                    kind: AtomKind::LineBreak,
+                    start: 1,
+                    end: 2
+                },
+                Atom {
+                    text: String::new(),
+                    style: style_code(),
+                    kind: AtomKind::BlankLine,
+                    start: 2,
+                    end: 2
+                },
+                Atom {
+                    text: "\n".into(),
+                    style: style_code(),
+                    kind: AtomKind::LineBreak,
+                    start: 2,
+                    end: 3
+                },
+                Atom {
+                    text: "b".into(),
+                    style: style_code(),
+                    kind: AtomKind::Text,
+                    start: 3,
+                    end: 4
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn code_blocks_do_not_add_trailing_blank_lines() {
+        let atoms = atomize_code("a\n");
+        assert_eq!(atoms.len(), 2);
+        assert_eq!(atoms[1].kind, AtomKind::LineBreak);
+        assert!(atomize_code("").is_empty());
+    }
+
+    #[test]
+    fn code_blocks_keep_indentation_as_separate_atoms() {
+        let atoms = atomize_code("  x");
+        assert_eq!(
+            atoms,
+            vec![
+                Atom {
+                    text: " ".into(),
+                    style: style_code(),
+                    kind: AtomKind::Text,
+                    start: 0,
+                    end: 1
+                },
+                Atom {
+                    text: " ".into(),
+                    style: style_code(),
+                    kind: AtomKind::Text,
+                    start: 1,
+                    end: 2
+                },
+                Atom {
+                    text: "x".into(),
+                    style: style_code(),
+                    kind: AtomKind::Text,
+                    start: 2,
+                    end: 3
+                },
             ]
         );
     }

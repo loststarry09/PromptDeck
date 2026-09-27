@@ -12,6 +12,7 @@ path = "src/main.rs"
 promptdeck-core = { path = "../promptdeck-core" }
 slint.workspace = true
 chrono.workspace = true
+arboard.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

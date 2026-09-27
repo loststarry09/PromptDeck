@@ -9,11 +9,14 @@ use promptdeck_core::error::Result as CoreResult;
 use promptdeck_core::storage::library::{Library, SETTING_RAIL_EXPANDED, SETTING_THEME};
 
 use crate::markdown;
+use crate::selection::{BlockInfo, Document, Position, Selection};
 use crate::strings;
 use crate::theme::{self, ThemeMode};
-use crate::{AppWindow, MarkdownBlock, PromptRow};
+use crate::{AppWindow, MarkdownBlock, MarkdownSelection, PromptRow};
 
 const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
+/// 等布局稳定后再向 UI 取一次完整 atom 几何（首次渲染时 atom 可能尚未实例化）。
+const GEOMETRY_SETTLE_DELAY: Duration = Duration::from_millis(80);
 
 /// 画布模式。Markdown 模式只读渲染；Source 模式是唯一可编辑面（ADR-0003）。
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -38,9 +41,13 @@ pub struct Controller {
     ui: Weak<AppWindow>,
     items: Rc<VecModel<PromptRow>>,
     save_timer: Timer,
+    geometry_timer: Timer,
     dirty: Cell<bool>,
     active_id: RefCell<Option<String>>,
     modes: RefCell<HashMap<String, ViewMode>>,
+    document: RefCell<Document>,
+    selection: RefCell<Option<Selection>>,
+    selecting: Cell<bool>,
     theme_mode: Cell<ThemeMode>,
     rail_expanded: Cell<bool>,
 }
@@ -61,9 +68,13 @@ impl Controller {
             ui: ui.as_weak(),
             items,
             save_timer: Timer::default(),
+            geometry_timer: Timer::default(),
             dirty: Cell::new(false),
             active_id: RefCell::new(None),
             modes: RefCell::new(HashMap::new()),
+            document: RefCell::new(Document::default()),
+            selection: RefCell::new(None),
+            selecting: Cell::new(false),
             theme_mode: Cell::new(theme_mode),
             rail_expanded: Cell::new(rail_expanded),
         });
@@ -78,6 +89,20 @@ impl Controller {
                     }
                 });
             controller.save_timer.stop();
+        }
+
+        {
+            let weak = Rc::downgrade(&controller);
+            controller.geometry_timer.start(
+                TimerMode::SingleShot,
+                GEOMETRY_SETTLE_DELAY,
+                move || {
+                    if let Some(controller) = weak.upgrade() {
+                        controller.bump_geometry();
+                    }
+                },
+            );
+            controller.geometry_timer.stop();
         }
 
         {
@@ -111,6 +136,43 @@ impl Controller {
         {
             let controller = controller.clone();
             ui.on_toggle_mode(move || controller.toggle_mode());
+        }
+        {
+            let controller = controller.clone();
+            ui.on_markdown_atom_geometry(move |block, atom, x, y, w, h| {
+                controller.document.borrow_mut().set_atom_rect(
+                    block.max(0) as usize,
+                    atom.max(0) as usize,
+                    x,
+                    y,
+                    w,
+                    h,
+                );
+            });
+        }
+        {
+            let controller = controller.clone();
+            ui.on_markdown_pressed(move |x, y| controller.begin_selection(x, y));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_markdown_moved(move |x, y| controller.extend_selection(x, y));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_markdown_released(move || controller.selecting.set(false));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_markdown_double_clicked(move |x, y| controller.select_atom_at(x, y));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_copy_selection(move || controller.copy_selection());
+        }
+        {
+            let controller = controller.clone();
+            ui.on_select_all(move || controller.select_all());
         }
 
         controller.refresh_items();
@@ -192,16 +254,132 @@ impl Controller {
         ui.set_markdown_mode(mode == ViewMode::Markdown);
         if mode == ViewMode::Markdown {
             self.render_markdown(ui);
+        } else {
+            self.selecting.set(false);
+            *self.selection.borrow_mut() = None;
+            self.push_selection(ui);
         }
     }
 
     fn render_markdown(&self, ui: &AppWindow) {
-        let blocks = markdown::to_ui_blocks(&ui.get_body_text());
-        ui.set_markdown_blocks(ModelRc::from(Rc::new(VecModel::from(blocks))));
+        let doc = markdown::render(&ui.get_body_text());
+        let infos = doc
+            .texts
+            .iter()
+            .zip(doc.atom_ranges.iter())
+            .map(|(text, atoms)| BlockInfo {
+                text: text.clone(),
+                atoms: atoms.clone(),
+            })
+            .collect();
+        self.document.borrow_mut().set_blocks(infos);
+        self.selecting.set(false);
+        *self.selection.borrow_mut() = None;
+
+        ui.set_markdown_blocks(ModelRc::from(Rc::new(VecModel::from(doc.blocks))));
+        self.push_selection(ui);
+        ui.set_markdown_geometry_tick(ui.get_markdown_geometry_tick() + 1);
+        self.geometry_timer.restart();
+    }
+
+    fn bump_geometry(&self) {
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_markdown_geometry_tick(ui.get_markdown_geometry_tick() + 1);
+        }
+    }
+
+    fn begin_selection(&self, x: f32, y: f32) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let hit = self.document.borrow().hit_test(x, y);
+        self.selecting.set(true);
+        *self.selection.borrow_mut() = hit.map(|position| Selection {
+            anchor: position,
+            focus: position,
+        });
+        self.push_selection(&ui);
+    }
+
+    fn extend_selection(&self, x: f32, y: f32) {
+        if !self.selecting.get() {
+            return;
+        }
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let Some(focus) = self.document.borrow().hit_test(x, y) else {
+            return;
+        };
+        let Some(anchor) = self.selection.borrow().map(|selection| selection.anchor) else {
+            return;
+        };
+        *self.selection.borrow_mut() = Some(Selection { anchor, focus });
+        self.push_selection(&ui);
+    }
+
+    fn select_atom_at(&self, x: f32, y: f32) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let Some((block, start, end)) = self.document.borrow().hit_test_atom(x, y) else {
+            return;
+        };
+        *self.selection.borrow_mut() = Some(Selection {
+            anchor: Position {
+                block,
+                offset: start,
+            },
+            focus: Position { block, offset: end },
+        });
+        self.push_selection(&ui);
+    }
+
+    fn select_all(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        *self.selection.borrow_mut() = self.document.borrow().select_all();
+        self.push_selection(&ui);
+    }
+
+    /// `Ctrl+C`：复制当前选择的渲染文本（无选择时不改剪贴板）。
+    fn copy_selection(&self) {
+        let Some(selection) = *self.selection.borrow() else {
+            return;
+        };
+        let text = self.document.borrow().text(selection);
+        if text.is_empty() {
+            return;
+        }
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(text);
+        }
+    }
+
+    fn push_selection(&self, ui: &AppWindow) {
+        let payload = match *self.selection.borrow() {
+            Some(selection) => {
+                let (start, end) = Document::normalized(selection);
+                MarkdownSelection {
+                    active: !Document::is_selection_empty(selection),
+                    block_a: start.block as i32,
+                    off_a: start.offset as i32,
+                    block_b: end.block as i32,
+                    off_b: end.offset as i32,
+                }
+            }
+            None => MarkdownSelection::default(),
+        };
+        ui.set_markdown_selection(payload);
     }
 
     fn clear_markdown_blocks(&self, ui: &AppWindow) {
+        self.document.borrow_mut().clear();
+        self.selecting.set(false);
+        *self.selection.borrow_mut() = None;
         ui.set_markdown_blocks(ModelRc::from(Rc::new(VecModel::<MarkdownBlock>::default())));
+        self.push_selection(ui);
     }
 
     pub fn mark_dirty(&self) {

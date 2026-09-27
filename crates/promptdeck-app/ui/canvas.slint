@@ -7,7 +7,7 @@
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Strings } from "strings.slint";
-import { MarkdownBlock, MarkdownView } from "markdown.slint";
+import { MarkdownBlock, MarkdownSelection, MarkdownView } from "markdown.slint";
 
 component SourceEditor inherits Rectangle {
     in-out property <string> text <=> input.text;
@@ -143,10 +143,19 @@ export component Canvas inherits Rectangle {
     in property <bool> has-selection: false;
     in property <bool> markdown-mode: false;
     in property <[MarkdownBlock]> markdown-blocks: [];
+    in property <MarkdownSelection> markdown-selection;
+    in-out property <int> markdown-geometry-tick: 0;
     in property <int> focus-request: 0;
     out property <bool> title-focused: title-input.has-focus;
     callback text-edited();
     callback mode-selected(mode: int);
+    callback markdown-atom-geometry(block: int, atom: int, x: length, y: length, w: length, h: length);
+    callback markdown-pressed(x: float, y: float);
+    callback markdown-moved(x: float, y: float);
+    callback markdown-released();
+    callback markdown-double-clicked(x: float, y: float);
+    callback copy-selection();
+    callback select-all();
 
     private property <float> pending-scroll-fraction: 0;
     private property <bool> sync-pending: false;
@@ -194,6 +203,16 @@ export component Canvas inherits Rectangle {
     mode-anchor := FocusScope {
         width: 0;
         height: 0;
+
+        KeyBinding {
+            keys: @keys(Control + C);
+            activated => { root.copy-selection(); }
+        }
+
+        KeyBinding {
+            keys: @keys(Control + A);
+            activated => { root.select-all(); }
+        }
     }
 
     VerticalLayout {
@@ -292,6 +311,13 @@ export component Canvas inherits Rectangle {
                     height: 100%;
                     visible: root.markdown-mode;
                     blocks: root.markdown-blocks;
+                    selection: root.markdown-selection;
+                    geometry-tick: root.markdown-geometry-tick;
+                    atom-geometry(block, atom, x, y, w, h) => { root.markdown-atom-geometry(block, atom, x, y, w, h); }
+                    pointer-pressed(x, y) => { mode-anchor.focus(); root.markdown-pressed(x, y); }
+                    pointer-moved(x, y) => { root.markdown-moved(x, y); }
+                    pointer-released => { root.markdown-released(); }
+                    pointer-double-clicked(x, y) => { root.markdown-double-clicked(x, y); }
                 }
             }
 

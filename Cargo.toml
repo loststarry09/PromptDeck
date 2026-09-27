@@ -14,3 +14,4 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 thiserror = "2"
 uuid = { version = "1", features = ["v7"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+arboard = { version = "3.6", default-features = false }

@@ -5,7 +5,7 @@ export { Strings }
 import { SideRail } from "shell.slint";
 import { LibraryPanel, PromptRow } from "library.slint";
 import { Canvas } from "canvas.slint";
-import { MarkdownBlock } from "markdown.slint";
+import { MarkdownBlock, MarkdownSelection } from "markdown.slint";
 
 export component AppWindow inherits Window {
     title: Strings.app-title;
@@ -30,6 +30,8 @@ export component AppWindow inherits Window {
     in-out property <bool> library-empty: false;
     in-out property <bool> markdown-mode: false;
     in-out property <[MarkdownBlock]> markdown-blocks: [];
+    in-out property <MarkdownSelection> markdown-selection;
+    in-out property <int> markdown-geometry-tick: 0;
     out property <bool> title-focused: canvas.title-focused;
 
     callback new-prompt();
@@ -40,6 +42,13 @@ export component AppWindow inherits Window {
     callback search-edited();
     callback mode-selected(mode: int);
     callback toggle-mode();
+    callback markdown-atom-geometry(block: int, atom: int, x: length, y: length, w: length, h: length);
+    callback markdown-pressed(x: float, y: float);
+    callback markdown-moved(x: float, y: float);
+    callback markdown-released();
+    callback markdown-double-clicked(x: float, y: float);
+    callback copy-selection();
+    callback select-all();
 
     global-keys := FocusScope {
         KeyBinding {
@@ -98,11 +107,20 @@ export component AppWindow inherits Window {
                 has-selection: root.selected-id != "";
                 markdown-mode: root.markdown-mode;
                 markdown-blocks: root.markdown-blocks;
+                markdown-selection: root.markdown-selection;
+                markdown-geometry-tick: root.markdown-geometry-tick;
                 title-text <=> root.title-text;
                 body-text <=> root.body-text;
                 focus-request: root.editor-focus-request;
                 text-edited => { root.text-edited(); }
                 mode-selected(mode) => { root.mode-selected(mode); }
+                markdown-atom-geometry(block, atom, x, y, w, h) => { root.markdown-atom-geometry(block, atom, x, y, w, h); }
+                markdown-pressed(x, y) => { root.markdown-pressed(x, y); }
+                markdown-moved(x, y) => { root.markdown-moved(x, y); }
+                markdown-released => { root.markdown-released(); }
+                markdown-double-clicked(x, y) => { root.markdown-double-clicked(x, y); }
+                copy-selection => { root.copy-selection(); }
+                select-all => { root.select-all(); }
             }
         }
     }
