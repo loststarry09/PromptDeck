@@ -2,7 +2,9 @@
 
 Local-first、键盘优先的 **Prompt 工作台**。把 prompt 当作可维护的资产：本地管理、Markdown 编辑、变量填充、一键复制到目标应用。Rust + Slint + SQLite（bundled），编译为单个原生桌面可执行文件，不依赖 WebView / Node / 外部数据库，不联网。
 
-当前阶段：**Slice 01（Library 回路）已完成，可作为日常可用版本试用**。
+当前状态：**Slice 01（Library 回路）已完成**，首个公开测试版为 **`v0.1.0-preview.1`（Windows x64 安装包）**。
+
+> **Preview 测试版**，不代表稳定正式版：可能存在 UI / Markdown / 安装体验问题，且**未代码签名**。遇到问题请到 GitHub Issues 反馈。
 
 ## 当前已实现能力
 
@@ -17,7 +19,20 @@ Local-first、键盘优先的 **Prompt 工作台**。把 prompt 当作可维护�
 - **键盘可达**：`↑`/`↓` 移动列表选择、`Enter` 打开、`Esc` 退回搜索/清除搜索；非输入控件支持键盘 `Tab` 聚焦（可见焦点环）与 `Enter`/`Space` 激活。
 - **数据完好**：重启后内容、列表与选中状态保持。
 
-## 运行方式
+## 安装（Windows x64）
+
+从 GitHub Releases 下载最新 Preview 安装包并运行：
+
+- 页面：<https://github.com/loststarry09/PromptDeck/releases>
+- 文件：`PromptDeck-0.1.0-preview.1-windows-x64-setup.exe`（同目录附 `.sha256` 校验）
+
+安装为**每用户安装**（无需管理员权限），可自选安装目录；安装后从开始菜单启动，可在「设置 → 应用」中卸载。**卸载不会删除你的 Prompt 数据**（数据在用户数据目录，见下文）。
+
+安装包**未代码签名**，Windows SmartScreen 可能提示「未知发布者 / 更多信息」，属 Preview 已知限制。
+
+普通用户**无需**安装 Rust / Cargo / WSL / Node / Python / SQLite；exe 为静态 CRT、自带 SQLite，开箱即可运行。
+
+## 从源码运行（开发者）
 
 WSL / Linux（日常主工作区，需图形环境如 WSLg）：
 
@@ -25,7 +40,7 @@ WSL / Linux（日常主工作区，需图形环境如 WSLg）：
 cargo run
 ```
 
-Windows 原生：见下方「Windows 构建」，运行生成的 `promptdeck.exe`。
+Windows 原生：见下方「Windows 原生构建」，运行生成的 `promptdeck.exe`。
 
 ## 常用快捷键
 
@@ -49,6 +64,7 @@ Windows 原生：见下方「Windows 构建」，运行生成的 `promptdeck.exe
   2. 可执行文件同级的 `portable.flag` → `.\data`
   3. 平台默认：Windows `%LOCALAPPDATA%\PromptDeck`、Linux `$XDG_DATA_HOME/promptdeck`
 - 编辑历史（Version）在保存时静默累积（哈希去重 + ≥10s 限频），当前无历史 UI。
+- 数据完全 Local-first，不联网、不上传；请勿手工编辑 SQLite。**卸载应用不会删除该数据目录。**
 
 ## Windows 原生构建
 
@@ -66,6 +82,14 @@ D:\build\promptdeck\target\x86_64-pc-windows-msvc\release\promptdeck.exe
 ```
 
 （脚本会 rsync 源码到 `D:\build\promptdeck`，再用 `cargo.exe --target x86_64-pc-windows-msvc` 构建。）
+
+生成 Windows 安装包（需 Inno Setup 6，见 ADR-0009）：
+
+```bash
+./scripts/build-windows-installer.sh
+```
+
+产物：`D:\build\promptdeck\dist\PromptDeck-0.1.0-preview.1-windows-x64-setup.exe`（含 `.sha256`）。安装器使用项目图标（由 `ui/assets/app-icon.png` 生成多尺寸 `ui/assets/app.ico`）。
 
 ## 环境要求
 
@@ -93,7 +117,8 @@ cargo test --workspace
 - 快捷键 `Ctrl+K`（Quick Launcher）、变量填值表单、Version 历史 UI、删除/回收站 UI、导入/导出**尚未实现**。
 - 列表行最多直接显示 3 个标签 chip，其余以「+N」表示。
 - 搜索随输入即时查询、不参与选中；筛选后列表无可视选中时，`Enter` 仍打开画布当前条目（先按 `↓` 打开首个结果）。
-- 动态 CRT（依赖系统 `VCRUNTIME140.dll`）；无 Installer / Portable / 签名 / 自动更新，无 `LICENSE`。
+- **Preview 状态**：未代码签名，Windows SmartScreen 可能提示「未知发布者」；暂无自动更新、Portable 包、商店发布。
+- 采用静态 CRT（exe 无 VC++ 运行库依赖）；暂未确定 `LICENSE`。
 
 ## 文档
 

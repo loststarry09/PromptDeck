@@ -6,10 +6,12 @@
 
 ## 0. Source of truth 优先级（冲突时以此为准）
 
-1. **`docs/adr/0001`–`0008`**（锁定决策）与 **`CONTEXT.md`**（唯一词汇表）。
+1. **`docs/adr/0001`–`0009`**（锁定决策）与 **`CONTEXT.md`**（唯一词汇表）。
 2. **`docs/mvp.md`、`docs/data-model.md`、`docs/architecture.md`、`docs/design-foundations.md`** 与**当前切片 spec / ticket**（`.scratch/slice-01-library-loop/{spec.md,issues/*}`）。
 3. 本交接摘要：只做压缩与导航，**不得**用于推翻上述文件。
-4. `report/`（各工单完成报告）是「已发生了什么」的记录，但**已被 `.gitignore` 排除**，仅本地存在；后续以 ticket 的 `## Comments` 和 git 历史为准。
+4. `report/`（各工单完成报告）是「已发生了什么」的记录，**冷存储**——已被 `.gitignore` 排除、仅本地存在，仅在需要细节时查，**不作为决策依据**；后续以 ticket 的 `## Comments` 和 git 历史为准。
+
+> 阅读规则（默认必读 vs 按需读取）见 §10。
 
 > 约定：领域概念一律使用 `CONTEXT.md` 词汇（Prompt / Reusable Block / Composition / Variable / Version / Tag / Single canvas / Source mode / Markdown mode / Quick Launcher / Prompt Radar / Inbox）；禁止用其 `_Avoid_` 同义词。
 
@@ -125,6 +127,8 @@ Window
 | **06** Tags | `926c61e` | 画布增删标签；列表行展示标签 chip（最多 3 个，其余「+N」）；点击 chip 过滤列表、可与搜索叠加；大小写不敏感唯一；空/重复标签内联提示；标签不再被使用时从词表消失 |
 | **07** 键盘工作流 + 状态收口 | `6a6e8a8` | `↑`/`↓` 移动列表选择（焦点留在搜索框）、`Enter` 打开、`Esc` 画布退回/搜索清空、`Ctrl+S` 强制 flush；保存状态「保存中…/已保存/失败」；失败不丢内容并中止切换/新建；`Ctrl+N` 清空搜索与标签筛选；选中行滚动跟随；keyboard-only focus-visible 焦点环；Slice 01 完整 DoD 双端验收 |
 
+> **Preview 收口（2026-09-27，本任务的追加项）**：Slice 01 封板后追加一次**发布收口**——版本统一 `0.1.0-preview.1`、Windows exe 嵌入图标/版本资源、静态 CRT、Inno Setup 安装包、GitHub Pre-release 分发（详见 §6）。**不引入任何新功能，不开启 Slice 02。**
+
 ## 5. 最终行为参考
 
 ### 快捷键（全部已接线）
@@ -195,7 +199,9 @@ Quick Launcher（`Ctrl+K`）**未实现**（Slice 02 或更后）。
 
 - **测试**：`cargo test --workspace` = **144 passed**（core 119 + app 25），0 failed。core 覆盖迁移幂等、CRUD/软删除、FTS/短查询兜底、变量解析/替换、修订去重限频、标题推导、哈希向量、Markdown 块/行内/atom；app 覆盖 `markdown::render` 映射与 `listnav::stepped_index`。
 - **WSL（主工作区）**：`cargo fmt --check` / `cargo clippy --workspace --all-targets`（0 警告）/ `cargo test --workspace` / `cargo run`（WSLg GUI）均通过。
-- **Windows 原生**：`./scripts/build-windows.sh` 成功；产物 `D:\build\promptdeck\target\x86_64-pc-windows-msvc\release\promptdeck.exe`。**动态 CRT**（依赖系统 `VCRUNTIME140.dll`）。
+- **Windows 原生**：`./scripts/build-windows.sh` 成功；产物 `D:\build\promptdeck\target\x86_64-pc-windows-msvc\release\promptdeck.exe`。**静态 CRT**（`.cargo/config.toml` 中 `x86_64-pc-windows-msvc` 加 `+crt-static`），exe 不再依赖 `VCRUNTIME140.dll`；导入表仅系统 DLL。
+- **Windows 安装包（Preview）**：`./scripts/build-windows-installer.sh` → `D:\build\promptdeck\dist\PromptDeck-0.1.0-preview.1-windows-x64-setup.exe`（含 `.sha256`）。技术方案见 **ADR-0009**：Inno Setup 6、每用户安装（无 UAC、可选安装目录）、开始菜单快捷方式、可靠卸载。
+- **图标 / 版本资源**：`ui/assets/app-icon.png` → 多尺寸 `ui/assets/app.ico`，经 `crates/promptdeck-app/app.rc` + `embed-resource` 在 Windows 构建时嵌入 exe（版本 `0.1.0-preview.1`）。运行时窗口图标仍由 `ui/app.slint` 的 `icon:` 提供。
 - **手工冒烟**：MVP 不做 UI 自动化；WSLg + Windows 各一轮覆盖 `↑`/`↓`/`Enter`/`Esc`/`Ctrl+S`/`Ctrl+N`/`Ctrl+M`/`Ctrl+Shift+C`、保存三态、复制解析、重启持久化。WSLg 运行提示：`SLINT_BACKEND=software` 且清 `WAYLAND_DISPLAY`（X11）；截屏需从 Windows 侧抓取（x11grab 全黑）。
 
 ## 7. 已知限制、技术债、backlog
@@ -207,7 +213,7 @@ Quick Launcher（`Ctrl+K`）**未实现**（Slice 02 或更后）。
 - 列表行最多显示 3 个标签 chip；标签过滤不持久化。
 - **OPEN（backlog）**：Markdown 渲染个别 CJK 字形观感不一致（例 `区` 在暗色长文）——**未定位**，假设涉及逐字字体回退或 atom `preferred-width` 取整裁边，验证方法见 `.scratch/backlog.md`。
 - 焦点块在多个 Slint 组件中重复（`FocusScope` 的 keyboard-focus 模板 ×6）、`save-state`/`selected-index` 以 int 跨 FFI、`LibraryPanel.row-height` 62px 与 `LibraryRow` 高度重复——均为评审记录的**判断项**，未在收口阶段重构。
-- 动态 CRT 未静态化；发布体系（Installer/Portable/签名/静态 CRT/自动更新）整体推迟。
+- **Preview 发布状态**：Windows x64 安装包已提供（ADR-0009）；**未代码签名** → Windows SmartScreen 可能提示「未知发布者」，属 Preview 已知限制，不尝试绕过；**无自动更新、无 Portable、无商店发布**。静态 CRT 已完成（exe 无 VC++ 运行库依赖）。
 - **许可证未定**，无 `LICENSE` 文件（发布前决定）。
 - **`.scratch/`、`.agents/`、`report/` 的版本管理策略未决**（当前均 gitignore）。
 
@@ -219,26 +225,36 @@ Quick Launcher（`Ctrl+K`）**未实现**（Slice 02 或更后）。
 
 ## 9. 下一阶段：暂停，等待真实使用反馈
 
-**当前阶段暂停。** 不制定 Slice 02 实施计划。作者将实际日用一段时间；新 Agent 的默认动作是：**只读本文件 + 当前任务**，先理解现状，不主动开启新功能。待反馈后，再由作者决定方向（可能是 Quick Launcher / 变量填值体验，也可能是优先修复日用中暴露的问题）。
+**当前阶段暂停。** 首个公开 Preview（`v0.1.0-preview.1`，Windows x64 安装包）已随 Slice 01 收口发布；不制定 Slice 02 实施计划。作者将实际日用一段时间；新 Agent 的默认动作是：**只读本文件 + 当前任务**，先理解现状，不主动开启新功能。待反馈后，再由作者决定方向（可能是 Quick Launcher / 变量填值体验，也可能是优先修复日用中暴露的问题）。
 
-## 10. 文件索引与建议 skills
+## 10. 阅读规则（新 Agent 默认动作）、文件索引与建议 skills
 
-**必读（按序）**：
+### 默认必读
 
-1. `CONTEXT.md` — 领域词汇，输出命名必须对齐。
-2. `docs/adr/0001`–`0008` — 锁定决策（尤其 0002/0003/0006/0007/0008）。
-3. `docs/mvp.md` — 范围与里程碑。
-4. `docs/data-model.md` — schema、Variables 规则、修订策略。
-5. `docs/architecture.md` — 模块边界与测试策略。
-6. `docs/slices/01-library-loop.md` — 切片 DoD（已完成）。
-7. 本文件（`docs/stage-01-handoff.md`）。
+仅以下两项，不要在默认情况下额外加载其他文档：
 
-**按需**：
+1. 本文件（`docs/stage-01-handoff.md`）。
+2. 当前任务 / 当前 ticket。
 
-- `docs/design-foundations.md` + `design/design.md`（改 UI 时；design.md 为锁定真源）。
-- `.scratch/backlog.md` — CJK 字形 OPEN 项。
-- `README.md` — 能力、快捷键、运行/构建、数据目录。
+### 按需读取
+
+以下内容默认**不**主动加载，仅在当前任务确实涉及对应细节、发生文档冲突、或准备修改既有决策时才读取：
+
+- `CONTEXT.md` — 领域词汇（输出命名需对齐时才读）。
+- `docs/adr/` — 锁定决策（准备改决策前读对应 ADR；尤其 0002/0003/0006/0007/0008/0009）。
+- `docs/mvp.md` — 范围与里程碑。
+- `docs/data-model.md` — schema、Variables 规则、修订策略。
+- `docs/architecture.md` — 模块边界与测试策略。
+- `docs/design-foundations.md` + `design/design.md` — 改 UI 时（design.md 为锁定真源）。
+- `docs/slices/` — 切片 DoD（如 `01-library-loop.md`，已完成）。
+- `.scratch/` — 当前 spec / ticket / backlog（如 CJK 字形 OPEN 项：`.scratch/backlog.md`）。
+- `report/*.md`（本地、gitignore）— **冷存储**：历史完成报告，仅在需要具体细节时查，**不作为决策依据**。
+- `README.md` — 能力、快捷键、运行/构建、安装、数据目录。
 - 代码入口：`crates/promptdeck-core/src/{model,storage/library,markdown,search,variables}.rs`、`crates/promptdeck-app/src/{controller,markdown,selection,listnav}.rs`、`crates/promptdeck-app/ui/{app,canvas,library,shell,markdown,focusring,theme}.slint`。
-- `report/*.md`（本地、gitignore）— 历史完成报告，仅在需要细节时查；**不作为决策依据**。
+- 打包入口：`packaging/windows/promptdeck.iss`、`crates/promptdeck-app/app.rc`、`scripts/build-windows-installer.sh`。
+
+### Source of Truth 优先级（冲突时）
+
+**ADR / `CONTEXT.md` / 当前正式 spec 与 docs 的权威性高于本交接摘要。** 本文件只是默认上下文的压缩入口，**不拥有推翻正式决策的权限**；发现冲突时以 ADR / 正式文档为准，并顺手修正本文件。
 
 **建议 skills**：实现新功能用 `implement`（配合 `tdd`，core 走真实内存 SQLite 主 seam）；完成后用 `code-review` 做 Standards/Spec 双轴审查；涉及新决策时用 `domain-modeling` / `grill-with-docs` 维护 `CONTEXT.md` 与 ADR；跨会话状态用 `handoff`；不确定流程时用 `ask-matt`；涉及 UI 修复用 `hallmark`（DNA 参考 `design/design.md`）。
