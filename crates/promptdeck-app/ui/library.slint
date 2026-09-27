@@ -7,6 +7,7 @@ export struct PromptRow {
     id: string,
     title: string,
     updated-label: string,
+    pinned: bool,
 }
 
 component NewButton inherits FocusScope {
@@ -107,6 +108,7 @@ component SearchField inherits Rectangle {
 component LibraryRow inherits Rectangle {
     in property <string> title;
     in property <string> updated-label;
+    in property <bool> pinned: false;
     in property <bool> selected: false;
     callback clicked();
 
@@ -141,12 +143,27 @@ component LibraryRow inherits Rectangle {
         alignment: center;
         spacing: 2px;
 
-        Text {
-            text: root.title;
-            font-size: Theme.text-base;
-            font-weight: 600;
-            color: Theme.ink;
-            overflow: elide;
+        HorizontalLayout {
+            spacing: 6px;
+
+            if root.pinned : VerticalLayout {
+                alignment: center;
+
+                AppIcon {
+                    source: @image-url("icons/pin.svg");
+                    icon-size: 12px;
+                    tint: Theme.ink-muted;
+                }
+            }
+
+            Text {
+                text: root.title;
+                horizontal-stretch: 1;
+                font-size: Theme.text-base;
+                font-weight: 600;
+                color: Theme.ink;
+                overflow: elide;
+            }
         }
 
         Text {
@@ -269,6 +286,7 @@ export component LibraryPanel inherits Rectangle {
             for row in root.prompts : LibraryRow {
                 title: row.title;
                 updated-label: row.updated-label;
+                pinned: row.pinned;
                 selected: row.id == root.selected-id;
                 clicked => { root.select-prompt(row.id); }
             }

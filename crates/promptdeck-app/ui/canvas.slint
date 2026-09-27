@@ -7,6 +7,7 @@
 import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Strings } from "strings.slint";
+import { AppIcon } from "icons.slint";
 import { MarkdownBlock, MarkdownSelection, MarkdownView } from "markdown.slint";
 
 component SourceEditor inherits Rectangle {
@@ -111,6 +112,56 @@ component ModeSegment inherits FocusScope {
     }
 }
 
+component PinButton inherits FocusScope {
+    in property <bool> pinned: false;
+    callback toggled();
+
+    height: 32px;
+    focus-on-click: true;
+    focus-on-tab-navigation: true;
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-input;
+        background: root.pinned
+            ? (touch.pressed ? Theme.control-hover : Theme.control)
+            : (touch.pressed || touch.has-hover ? Theme.control-hover : transparent);
+        animate background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-2xs;
+        padding-right: Theme.space-xs;
+        spacing: 6px;
+
+        VerticalLayout {
+            alignment: center;
+
+            AppIcon {
+                source: @image-url("icons/pin.svg");
+                icon-size: 16px;
+                tint: root.pinned ? Theme.ink : Theme.ink-2;
+            }
+        }
+
+        Text {
+            text: root.pinned ? Strings.pinned : Strings.pin;
+            font-size: Theme.text-sm;
+            color: root.pinned ? Theme.ink : Theme.ink-2;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.focus();
+            root.toggled();
+        }
+    }
+}
+
 component ModeSwitcher inherits Rectangle {
     in property <bool> markdown-selected: false;
     callback mode-selected(mode: int);
@@ -141,6 +192,7 @@ export component Canvas inherits Rectangle {
     in-out property <string> title-text <=> title-input.text;
     in-out property <string> body-text <=> editor.text;
     in property <bool> has-selection: false;
+    in property <bool> pinned: false;
     in property <bool> markdown-mode: false;
     in property <[MarkdownBlock]> markdown-blocks: [];
     in property <MarkdownSelection> markdown-selection;
@@ -150,6 +202,7 @@ export component Canvas inherits Rectangle {
     out property <bool> title-focused: title-input.has-focus;
     callback text-edited();
     callback mode-selected(mode: int);
+    callback toggle-pin();
     callback markdown-atom-geometry(block: int, atom: int, x: length, y: length, w: length, h: length);
     callback markdown-pressed(x: float, y: float);
     callback markdown-moved(x: float, y: float);
@@ -258,41 +311,53 @@ export component Canvas inherits Rectangle {
             padding-bottom: Theme.space-sm;
             spacing: Theme.space-xs;
 
-            Rectangle {
+            HorizontalLayout {
                 height: 44px;
-
-                title-input := TextInput {
-                    width: 100%;
-                    height: 100%;
-                    single-line: true;
-                    font-family: Theme.font-body;
-                    font-size: Theme.text-title;
-                    font-weight: 600;
-                    color: Theme.ink;
-                    vertical-alignment: center;
-                    edited => { root.text-edited(); }
-                }
-
-                Text {
-                    x: 0;
-                    y: 0;
-                    width: 100%;
-                    height: 100%;
-                    visible: title-input.text == "";
-                    text: Strings.title-placeholder;
-                    font-family: Theme.font-body;
-                    font-size: Theme.text-title;
-                    font-weight: 600;
-                    color: Theme.ink-muted;
-                    vertical-alignment: center;
-                }
+                spacing: Theme.space-2xs;
 
                 Rectangle {
-                    y: parent.height - self.height;
-                    width: 100%;
-                    height: title-input.has-focus ? 2px : 1px;
-                    background: title-input.has-focus ? Theme.focus : Theme.rule-strong;
-                    animate height, background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                    horizontal-stretch: 1;
+                    min-width: 0;
+                    height: 100%;
+
+                    title-input := TextInput {
+                        width: 100%;
+                        height: 100%;
+                        single-line: true;
+                        font-family: Theme.font-body;
+                        font-size: Theme.text-title;
+                        font-weight: 600;
+                        color: Theme.ink;
+                        vertical-alignment: center;
+                        edited => { root.text-edited(); }
+                    }
+
+                    Text {
+                        x: 0;
+                        y: 0;
+                        width: 100%;
+                        height: 100%;
+                        visible: title-input.text == "";
+                        text: Strings.title-placeholder;
+                        font-family: Theme.font-body;
+                        font-size: Theme.text-title;
+                        font-weight: 600;
+                        color: Theme.ink-muted;
+                        vertical-alignment: center;
+                    }
+
+                    Rectangle {
+                        y: parent.height - self.height;
+                        width: 100%;
+                        height: title-input.has-focus ? 2px : 1px;
+                        background: title-input.has-focus ? Theme.focus : Theme.rule-strong;
+                        animate height, background { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                    }
+                }
+
+                PinButton {
+                    pinned: root.pinned;
+                    toggled => { root.toggle-pin(); }
                 }
             }
 

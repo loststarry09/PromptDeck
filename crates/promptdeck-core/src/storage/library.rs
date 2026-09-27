@@ -19,7 +19,8 @@ pub const SETTING_RAIL_EXPANDED: &str = "rail.expanded";
 
 const ITEM_COLUMNS: &str = "id, kind, title, body_md, pinned, created_at, updated_at, deleted_at";
 const SUMMARY_COLUMNS: &str = "i.id, i.kind, i.title, i.pinned, i.created_at, i.updated_at";
-const SUMMARY_ORDER: &str = "ORDER BY i.updated_at DESC, i.created_at DESC, i.id DESC";
+const SUMMARY_ORDER: &str =
+    "ORDER BY i.pinned DESC, i.updated_at DESC, i.created_at DESC, i.id DESC";
 
 pub struct Library {
     conn: Connection,
@@ -160,6 +161,18 @@ impl Library {
 
     pub fn load(&self, id: &str) -> Result<Option<Item>> {
         load_item(&self.conn, id)
+    }
+
+    /// Sets an item's pinned flag. Pinning is a separate axis from recency:
+    /// `updated_at` is deliberately left untouched, so unpinning returns the
+    /// Prompt to its original place in the update order.
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<Item> {
+        self.conn.execute(
+            "UPDATE items SET pinned = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+            params![pinned, id],
+        )?;
+        self.load(id)?
+            .ok_or_else(|| Error::ItemNotFound(id.to_string()))
     }
 
     /// The derived Variable definitions for an item, ordered by name.
@@ -612,6 +625,89 @@ mod tests {
     }
 
     #[test]
+    fn set_pinned_roundtrips_and_leaves_updated_at_alone() {
+        let (library, clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        clock.advance(1_000);
+
+        let pinned = library.set_pinned(&item.id, true).expect("pin");
+        assert!(pinned.pinned);
+        assert_eq!(pinned.updated_at, item.updated_at);
+        assert!(library.load(&item.id).expect("load").expect("item").pinned);
+
+        let unpinned = library.set_pinned(&item.id, false).expect("unpin");
+        assert!(!unpinned.pinned);
+        assert_eq!(unpinned.updated_at, item.updated_at);
+    }
+
+    #[test]
+    fn set_pinned_rejects_unknown_and_soft_deleted_items() {
+        let (library, _clock, _ids) = library();
+        assert!(library.set_pinned("missing", true).is_err());
+
+        let item = library.create_prompt().expect("create");
+        library.soft_delete(&item.id).expect("delete");
+        assert!(library.set_pinned(&item.id, true).is_err());
+    }
+
+    #[test]
+    fn list_orders_pinned_prompts_first_then_by_recency() {
+        let (library, clock, _ids) = library();
+        let oldest = library.create_prompt().expect("create oldest");
+        clock.advance(1_000);
+        let middle = library.create_prompt().expect("create middle");
+        clock.advance(1_000);
+        let newest = library.create_prompt().expect("create newest");
+
+        library.set_pinned(&oldest.id, true).expect("pin oldest");
+        assert_eq!(
+            summary_ids(&library.list_prompts().expect("list")),
+            vec![oldest.id.clone(), newest.id.clone(), middle.id.clone()]
+        );
+
+        library.set_pinned(&middle.id, true).expect("pin middle");
+        assert_eq!(
+            summary_ids(&library.list_prompts().expect("list")),
+            vec![middle.id.clone(), oldest.id.clone(), newest.id.clone()]
+        );
+
+        library.set_pinned(&middle.id, false).expect("unpin middle");
+        assert_eq!(
+            summary_ids(&library.list_prompts().expect("list")),
+            vec![oldest.id.clone(), newest.id.clone(), middle.id.clone()]
+        );
+    }
+
+    #[test]
+    fn search_orders_pinned_prompts_first_in_both_query_paths() {
+        let (library, clock, _ids) = library();
+        let old = library.create_prompt().expect("create old");
+        library
+            .save(&old.id, "", "请把这段话翻译成英文")
+            .expect("save old");
+        clock.advance(1_000);
+        let new = library.create_prompt().expect("create new");
+        library
+            .save(&new.id, "", "请把这句话翻译成法文")
+            .expect("save new");
+
+        assert_eq!(
+            summary_ids(&library.search_prompts("翻译").expect("search like")),
+            vec![new.id.clone(), old.id.clone()]
+        );
+
+        library.set_pinned(&old.id, true).expect("pin old");
+
+        for query in ["翻译", "翻译成"] {
+            assert_eq!(
+                summary_ids(&library.search_prompts(query).expect("search")),
+                vec![old.id.clone(), new.id.clone()],
+                "query {query:?} should put the pinned Prompt first"
+            );
+        }
+    }
+
+    #[test]
     fn search_finds_cjk_substrings_from_trigrams() {
         let (library, _clock, _ids) = library();
         let item = library.create_prompt().expect("create");
@@ -1038,5 +1134,40 @@ mod tests {
 
         library.remove_setting(SETTING_THEME).expect("remove");
         assert_eq!(library.setting(SETTING_THEME).expect("setting"), None);
+    }
+
+    #[test]
+    fn pinned_state_survives_reopening_the_database() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "promptdeck-pinned-{}-{stamp}.sqlite3",
+            std::process::id()
+        ));
+
+        let clock = TestClock::new(T0);
+        let ids = TestIds::new();
+        {
+            let library = Library::open_with(&path, clock.clone(), ids.clone()).expect("open");
+            let first = library.create_prompt().expect("first");
+            clock.advance(1_000);
+            library.create_prompt().expect("second");
+            library.set_pinned(&first.id, true).expect("pin");
+        }
+
+        let reopened = Library::open_with(&path, clock, ids).expect("reopen");
+        let listed = reopened.list_prompts().expect("list");
+        assert_eq!(
+            summary_ids(&listed),
+            vec!["item-0001".to_string(), "item-0002".to_string()]
+        );
+        assert!(listed[0].pinned);
+        drop(reopened);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
     }
 }

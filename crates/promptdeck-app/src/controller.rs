@@ -168,6 +168,10 @@ impl Controller {
         }
         {
             let controller = controller.clone();
+            ui.on_toggle_pin(move || controller.toggle_pin());
+        }
+        {
+            let controller = controller.clone();
             ui.on_markdown_atom_geometry(move |block, atom, x, y, w, h| {
                 controller.document.borrow_mut().set_atom_rect(
                     block.max(0) as usize,
@@ -240,6 +244,7 @@ impl Controller {
                 ui.set_selected_id(item.id.clone().into());
                 ui.set_title_text(item.title.into());
                 ui.set_body_text(item.body_md.into());
+                ui.set_pinned(item.pinned);
                 self.apply_mode(self.mode_for(&item.id), &ui);
                 ui.set_editor_focus_request(ui.get_editor_focus_request() + 1);
             }
@@ -248,6 +253,7 @@ impl Controller {
                 ui.set_selected_id(String::new().into());
                 ui.set_title_text(String::new().into());
                 ui.set_body_text(String::new().into());
+                ui.set_pinned(false);
                 ui.set_markdown_mode(false);
                 self.clear_markdown_blocks(&ui);
             }
@@ -268,6 +274,26 @@ impl Controller {
             ViewMode::Markdown => ViewMode::Source,
         };
         self.store_mode(next);
+    }
+
+    /// 切换当前 Prompt 的置顶状态并即时重排列表；置顶不动 `updated_at`，
+    /// 取消置顶后 Prompt 回到原有的“最近更新”位置。
+    pub fn toggle_pin(&self) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let Some(id) = self.active_id.borrow().clone() else {
+            return;
+        };
+        // 以库中状态为准切换（SQLite 是唯一真源），不读可能滞后的 UI 镜像。
+        let Ok(Some(current)) = self.library.load(&id) else {
+            return;
+        };
+        let Ok(item) = self.library.set_pinned(&id, !current.pinned) else {
+            return;
+        };
+        ui.set_pinned(item.pinned);
+        self.refresh_items();
     }
 
     fn store_mode(&self, mode: ViewMode) {
@@ -528,6 +554,7 @@ impl Controller {
                     summary.title.into()
                 },
                 updated_label: strings::updated_label(now, summary.updated_at).into(),
+                pinned: summary.pinned,
             })
             .collect::<Vec<_>>();
 

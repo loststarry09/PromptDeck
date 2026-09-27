@@ -14,6 +14,10 @@ _Avoid_: 仓库、vault、收藏夹
 一段可复用的指令文本，是 Library 的基本单位；MVP 中唯一存在的内容类型。
 _Avoid_: 模板、条目、note
 
+**Pin**（置顶）:
+Prompt 的布尔标记；置顶的 Prompt 在 Library 列表中排在未置顶者之前，且与 `updated_at` 相互独立（切换置顶不改变更新顺序）。
+_Avoid_: 收藏、星标
+
 **Reusable Block**（Block）:
 可被多个 Prompt 引用的 Markdown 片段。MVP 不实现，数据模型预留。
 _Avoid_: 片段、snippet、组件
