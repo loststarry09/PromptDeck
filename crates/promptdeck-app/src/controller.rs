@@ -6,6 +6,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel, Weak};
 
 use promptdeck_core::error::Result as CoreResult;
+use promptdeck_core::model::Tag;
 use promptdeck_core::storage::library::{Library, SETTING_RAIL_EXPANDED, SETTING_THEME};
 use promptdeck_core::variables;
 
@@ -20,6 +21,17 @@ const AUTOSAVE_DELAY: Duration = Duration::from_millis(800);
 const GEOMETRY_SETTLE_DELAY: Duration = Duration::from_millis(80);
 /// 复制成功提示的停留时长；到点自动淡出，无需用户操作。
 const COPY_FEEDBACK_DURATION: Duration = Duration::from_millis(1600);
+/// 列表行最多直接展示的标签 chip 数；其余以「+N」表示，避免行高与宽度被撑破。
+const LIST_TAG_LIMIT: usize = 3;
+
+/// Builds the Slint model of Tag labels shared by the canvas and list rows.
+fn tags_model(tags: &[Tag]) -> ModelRc<slint::SharedString> {
+    let labels = tags
+        .iter()
+        .map(|tag| slint::SharedString::from(tag.as_str()))
+        .collect::<Vec<_>>();
+    ModelRc::from(Rc::new(VecModel::from(labels)))
+}
 
 /// 画布模式。Markdown 模式只读渲染；Source 模式是唯一可编辑面（ADR-0003）。
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -57,6 +69,7 @@ pub struct Controller {
     dirty: Cell<bool>,
     active_id: RefCell<Option<String>>,
     modes: RefCell<HashMap<String, ViewMode>>,
+    active_tag: RefCell<Option<String>>,
     document: RefCell<Document>,
     selection: RefCell<Option<Selection>>,
     selecting: Cell<bool>,
@@ -85,6 +98,7 @@ impl Controller {
             dirty: Cell::new(false),
             active_id: RefCell::new(None),
             modes: RefCell::new(HashMap::new()),
+            active_tag: RefCell::new(None),
             document: RefCell::new(Document::default()),
             selection: RefCell::new(None),
             selecting: Cell::new(false),
@@ -172,6 +186,26 @@ impl Controller {
         }
         {
             let controller = controller.clone();
+            ui.on_add_tag(move |name| controller.add_tag(name.as_str()));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_tag_edited(move || controller.tag_input_edited());
+        }
+        {
+            let controller = controller.clone();
+            ui.on_remove_tag(move |tag| controller.remove_tag(tag.as_str()));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_toggle_tag_filter(move |tag| controller.toggle_tag_filter(tag.as_str()));
+        }
+        {
+            let controller = controller.clone();
+            ui.on_clear_tag_filter(move || controller.clear_tag_filter());
+        }
+        {
+            let controller = controller.clone();
             ui.on_markdown_atom_geometry(move |block, atom, x, y, w, h| {
                 controller.document.borrow_mut().set_atom_rect(
                     block.max(0) as usize,
@@ -233,6 +267,7 @@ impl Controller {
             return;
         };
         self.clear_copy_feedback(&ui);
+        ui.set_tag_error("".into());
 
         match id {
             Some(id) => {
@@ -245,6 +280,7 @@ impl Controller {
                 ui.set_title_text(item.title.into());
                 ui.set_body_text(item.body_md.into());
                 ui.set_pinned(item.pinned);
+                self.sync_tags(&ui, &item.id);
                 self.apply_mode(self.mode_for(&item.id), &ui);
                 ui.set_editor_focus_request(ui.get_editor_focus_request() + 1);
             }
@@ -254,6 +290,7 @@ impl Controller {
                 ui.set_title_text(String::new().into());
                 ui.set_body_text(String::new().into());
                 ui.set_pinned(false);
+                ui.set_tags(tags_model(&[]));
                 ui.set_markdown_mode(false);
                 self.clear_markdown_blocks(&ui);
             }
@@ -294,6 +331,89 @@ impl Controller {
         };
         ui.set_pinned(item.pinned);
         self.refresh_items();
+    }
+
+    /// 给当前 Prompt 挂一个 Tag 并即时刷新画布与列表。空白、重复（大小写不敏感）
+    /// 的输入会被拒绝并在输入框内给出明确提示；挂标签不改变 `updated_at`，因此
+    /// 不会打乱“置顶优先、其余按最近更新”的顺序。
+    pub fn add_tag(&self, name: &str) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let Some(id) = self.active_id.borrow().clone() else {
+            return;
+        };
+
+        let name = name.trim();
+        if name.is_empty() {
+            ui.set_tag_error(strings::TAG_EMPTY_ERROR.into());
+            return;
+        }
+        let existing = self.library.tags(&id).unwrap_or_default();
+        if existing
+            .iter()
+            .any(|tag| tag.as_str().eq_ignore_ascii_case(name))
+        {
+            ui.set_tag_error(strings::TAG_DUPLICATE_ERROR.into());
+            return;
+        }
+
+        if self.library.add_tag(&id, name).is_ok() {
+            ui.set_tag_error("".into());
+            self.sync_tags(&ui, &id);
+            self.refresh_items();
+        }
+    }
+
+    /// 从当前 Prompt 摘掉一个 Tag；该 Tag 若不再被任何 Prompt 使用则从词表消失。
+    pub fn remove_tag(&self, name: &str) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        let Some(id) = self.active_id.borrow().clone() else {
+            return;
+        };
+        if self.library.remove_tag(&id, name).is_err() {
+            return;
+        }
+        ui.set_tag_error("".into());
+        self.sync_tags(&ui, &id);
+        self.refresh_items();
+    }
+
+    /// 用户开始编辑标签输入：清掉上一次的拒绝提示。
+    pub fn tag_input_edited(&self) {
+        if let Some(ui) = self.ui.upgrade()
+            && !ui.get_tag_error().is_empty()
+        {
+            ui.set_tag_error("".into());
+        }
+    }
+
+    /// 点列表标签 chip 切换过滤：再次点击同一 Tag 或显式清除即恢复全量。
+    pub fn toggle_tag_filter(&self, tag: &str) {
+        let next = match self.active_tag.borrow().as_deref() {
+            Some(active) if active.eq_ignore_ascii_case(tag) => None,
+            _ => Some(tag.to_string()),
+        };
+        self.set_tag_filter(next);
+    }
+
+    pub fn clear_tag_filter(&self) {
+        self.set_tag_filter(None);
+    }
+
+    fn set_tag_filter(&self, tag: Option<String>) {
+        *self.active_tag.borrow_mut() = tag;
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_tag_filter(self.active_tag.borrow().clone().unwrap_or_default().into());
+        }
+        self.refresh_items();
+    }
+
+    fn sync_tags(&self, ui: &AppWindow, id: &str) {
+        let tags = self.library.tags(id).unwrap_or_default();
+        ui.set_tags(tags_model(&tags));
     }
 
     fn store_mode(&self, mode: ViewMode) {
@@ -540,21 +660,27 @@ impl Controller {
         };
         let now = self.library.now_ms();
         let query = ui.get_search_query().to_string();
-        let Ok(summaries) = self.library.search_prompts(&query) else {
+        let tag = self.active_tag.borrow().clone();
+        let Ok(summaries) = self.library.search_prompts(&query, tag.as_deref()) else {
             return;
         };
 
         let rows = summaries
             .into_iter()
-            .map(|summary| PromptRow {
-                id: summary.id.into(),
-                title: if summary.title.is_empty() {
-                    strings::UNTITLED.into()
-                } else {
-                    summary.title.into()
-                },
-                updated_label: strings::updated_label(now, summary.updated_at).into(),
-                pinned: summary.pinned,
+            .map(|summary| {
+                let visible = summary.tags.len().min(LIST_TAG_LIMIT);
+                PromptRow {
+                    id: summary.id.into(),
+                    title: if summary.title.is_empty() {
+                        strings::UNTITLED.into()
+                    } else {
+                        summary.title.into()
+                    },
+                    updated_label: strings::updated_label(now, summary.updated_at).into(),
+                    pinned: summary.pinned,
+                    tags: tags_model(&summary.tags[..visible]),
+                    tag_overflow: (summary.tags.len() - visible) as i32,
+                }
             })
             .collect::<Vec<_>>();
 

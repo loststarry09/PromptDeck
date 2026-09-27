@@ -6,6 +6,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("item not found: {0}")]
     ItemNotFound(String),
+    #[error("invalid tag: {0:?}")]
+    InvalidTag(String),
     #[error("unknown item kind in database: {0}")]
     UnknownItemKind(String),
 }

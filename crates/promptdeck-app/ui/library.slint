@@ -2,12 +2,15 @@ import { Theme } from "theme.slint";
 import { ListView } from "std-widgets.slint";
 import { Strings } from "strings.slint";
 import { AppIcon } from "icons.slint";
+import { TagChip } from "tagchip.slint";
 
 export struct PromptRow {
     id: string,
     title: string,
     updated-label: string,
     pinned: bool,
+    tags: [string],
+    tag-overflow: int,
 }
 
 component NewButton inherits FocusScope {
@@ -110,8 +113,13 @@ component LibraryRow inherits Rectangle {
     in property <string> updated-label;
     in property <bool> pinned: false;
     in property <bool> selected: false;
+    in property <[string]> tags: [];
+    in property <int> tag-overflow: 0;
+    in property <string> filter-tag: "";
     callback clicked();
+    callback toggle-tag(tag: string);
 
+    /* 列表行内容锁 54px（design-foundations）；标签并入元数据行，不新增行高。 */
     private property <length> content-height: 54px;
 
     height: content-height + 8px;
@@ -133,6 +141,30 @@ component LibraryRow inherits Rectangle {
         height: root.content-height - Theme.space-md;
         border-radius: 2px;
         background: Theme.accent;
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        width: parent.width;
+        height: 1px;
+        background: Theme.rule;
+    }
+
+    /* 行级点击面先声明，让行内标签 chip 的点击面叠在其上、优先响应。 */
+    touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => {
+            row-focus.focus();
+            root.clicked();
+        }
+    }
+
+    row-focus := FocusScope {
+        width: 100%;
+        height: 100%;
+        focus-on-click: false;
     }
 
     VerticalLayout {
@@ -164,34 +196,42 @@ component LibraryRow inherits Rectangle {
                 color: Theme.ink;
                 overflow: elide;
             }
+
+            /* 有标签时把时间让到标题行右侧，给标签腾出完整一行宽度。 */
+            if root.tags.length > 0 || root.tag-overflow > 0 : Text {
+                text: root.updated-label;
+                min-width: 0px;
+                font-size: Theme.text-sm;
+                color: Theme.ink-muted;
+                vertical-alignment: center;
+                overflow: elide;
+            }
         }
 
-        Text {
+        if root.tags.length > 0 || root.tag-overflow > 0 : HorizontalLayout {
+            spacing: Theme.space-3xs;
+
+            for tag in root.tags : TagChip {
+                label: tag;
+                selected: tag == root.filter-tag;
+                height: 18px;
+                max-width: 96px;
+                clicked => { root.toggle-tag(tag); }
+            }
+
+            if root.tag-overflow > 0 : Text {
+                text: "+" + root.tag-overflow;
+                font-size: Theme.text-xs;
+                color: Theme.ink-muted;
+                vertical-alignment: center;
+            }
+        }
+
+        if root.tags.length == 0 && root.tag-overflow == 0 : Text {
             text: root.updated-label;
             font-size: Theme.text-sm;
             color: Theme.ink-muted;
             overflow: elide;
-        }
-    }
-
-    Rectangle {
-        y: parent.height - 1px;
-        width: parent.width;
-        height: 1px;
-        background: Theme.rule;
-    }
-
-    row-focus := FocusScope {
-        width: 100%;
-        height: 100%;
-        focus-on-click: false;
-    }
-
-    touch := TouchArea {
-        mouse-cursor: pointer;
-        clicked => {
-            row-focus.focus();
-            root.clicked();
         }
     }
 }
@@ -232,9 +272,12 @@ export component LibraryPanel inherits Rectangle {
     in-out property <string> search-query;
     in property <string> search-empty-title;
     in property <bool> library-empty;
+    in property <string> tag-filter: "";
     callback new-prompt();
     callback select-prompt(id: string);
     callback search-edited();
+    callback toggle-tag-filter(tag: string);
+    callback clear-tag-filter();
 
     background: Theme.panel;
     border-radius: Theme.radius-panel;
@@ -270,14 +313,57 @@ export component LibraryPanel inherits Rectangle {
             edited => { root.search-edited(); }
         }
 
+        if root.tag-filter != "" : HorizontalLayout {
+            height: 22px;
+            spacing: Theme.space-3xs;
+
+            Text {
+                text: Strings.tag-filter-prefix;
+                font-size: Theme.text-xs;
+                color: Theme.ink-muted;
+                vertical-alignment: center;
+            }
+
+            TagChip {
+                label: root.tag-filter;
+                selected: true;
+                clicked => { root.clear-tag-filter(); }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            clear-hit := TouchArea {
+                width: 36px;
+                height: 22px;
+                mouse-cursor: pointer;
+
+                Text {
+                    text: Strings.tag-filter-clear;
+                    width: 100%;
+                    height: 100%;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    font-size: Theme.text-xs;
+                    color: clear-hit.has-hover ? Theme.ink : Theme.ink-2;
+                }
+
+                clicked => { root.clear-tag-filter(); }
+            }
+        }
+
         if root.prompts.length == 0 && root.library-empty : EmptyState {
             title: Strings.empty-library-title;
             hint: Strings.empty-library-hint;
         }
 
-        if root.prompts.length == 0 && !root.library-empty : EmptyState {
+        if root.prompts.length == 0 && !root.library-empty && root.search-empty-title != "" : EmptyState {
             title: root.search-empty-title;
             hint: Strings.empty-search-hint;
+        }
+
+        if root.prompts.length == 0 && !root.library-empty && root.search-empty-title == "" && root.tag-filter != "" : EmptyState {
+            title: Strings.tag-empty-title;
+            hint: Strings.tag-empty-hint;
         }
 
         if root.prompts.length > 0 : ListView {
@@ -287,8 +373,12 @@ export component LibraryPanel inherits Rectangle {
                 title: row.title;
                 updated-label: row.updated-label;
                 pinned: row.pinned;
+                tags: row.tags;
+                tag-overflow: row.tag-overflow;
+                filter-tag: root.tag-filter;
                 selected: row.id == root.selected-id;
                 clicked => { root.select-prompt(row.id); }
+                toggle-tag(tag) => { root.toggle-tag-filter(tag); }
             }
         }
     }

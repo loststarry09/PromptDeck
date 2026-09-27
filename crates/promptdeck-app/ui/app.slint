@@ -30,6 +30,9 @@ export component AppWindow inherits Window {
     in-out property <bool> library-empty: false;
     in-out property <bool> markdown-mode: false;
     in-out property <bool> pinned: false;
+    in-out property <[string]> tags: [];
+    in-out property <string> tag-error: "";
+    in-out property <string> tag-filter: "";
     in-out property <[MarkdownBlock]> markdown-blocks: [];
     in-out property <MarkdownSelection> markdown-selection;
     in-out property <int> markdown-geometry-tick: 0;
@@ -45,6 +48,11 @@ export component AppWindow inherits Window {
     callback mode-selected(mode: int);
     callback toggle-mode();
     callback toggle-pin();
+    callback add-tag(name: string);
+    callback remove-tag(tag: string);
+    callback tag-edited();
+    callback toggle-tag-filter(tag: string);
+    callback clear-tag-filter();
     callback markdown-atom-geometry(block: int, atom: int, x: length, y: length, w: length, h: length);
     callback markdown-pressed(x: float, y: float);
     callback markdown-moved(x: float, y: float);
@@ -106,9 +114,12 @@ export component AppWindow inherits Window {
                         search-query <=> root.search-query;
                         search-empty-title: root.search-empty-title;
                         library-empty: root.library-empty;
+                        tag-filter: root.tag-filter;
                         new-prompt => { root.new-prompt(); }
                         select-prompt(id) => { root.select-prompt(id); }
                         search-edited => { root.search-edited(); }
+                        toggle-tag-filter(tag) => { root.toggle-tag-filter(tag); }
+                        clear-tag-filter => { root.clear-tag-filter(); }
                     }
                 }
             }
@@ -120,6 +131,8 @@ export component AppWindow inherits Window {
                 height: 100%;
                 has-selection: root.selected-id != "";
                 pinned: root.pinned;
+                tags: root.tags;
+                tag-error: root.tag-error;
                 markdown-mode: root.markdown-mode;
                 markdown-blocks: root.markdown-blocks;
                 markdown-selection: root.markdown-selection;
@@ -131,6 +144,9 @@ export component AppWindow inherits Window {
                 text-edited => { root.text-edited(); }
                 mode-selected(mode) => { root.mode-selected(mode); }
                 toggle-pin => { root.toggle-pin(); }
+                tag-submitted(name) => { root.add-tag(name); }
+                tag-removed(tag) => { root.remove-tag(tag); }
+                tag-edited => { root.tag-edited(); }
                 markdown-atom-geometry(block, atom, x, y, w, h) => { root.markdown-atom-geometry(block, atom, x, y, w, h); }
                 markdown-pressed(x, y) => { root.markdown-pressed(x, y); }
                 markdown-moved(x, y) => { root.markdown-moved(x, y); }

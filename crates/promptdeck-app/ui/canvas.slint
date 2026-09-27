@@ -8,6 +8,7 @@ import { Theme } from "theme.slint";
 import { ScrollView } from "std-widgets.slint";
 import { Strings } from "strings.slint";
 import { AppIcon } from "icons.slint";
+import { TagChip } from "tagchip.slint";
 import { MarkdownBlock, MarkdownSelection, MarkdownView } from "markdown.slint";
 
 component SourceEditor inherits Rectangle {
@@ -193,6 +194,8 @@ export component Canvas inherits Rectangle {
     in-out property <string> body-text <=> editor.text;
     in property <bool> has-selection: false;
     in property <bool> pinned: false;
+    in property <[string]> tags: [];
+    in property <string> tag-error: "";
     in property <bool> markdown-mode: false;
     in property <[MarkdownBlock]> markdown-blocks: [];
     in property <MarkdownSelection> markdown-selection;
@@ -203,6 +206,9 @@ export component Canvas inherits Rectangle {
     callback text-edited();
     callback mode-selected(mode: int);
     callback toggle-pin();
+    callback tag-submitted(name: string);
+    callback tag-removed(tag: string);
+    callback tag-edited();
     callback markdown-atom-geometry(block: int, atom: int, x: length, y: length, w: length, h: length);
     callback markdown-pressed(x: float, y: float);
     callback markdown-moved(x: float, y: float);
@@ -358,6 +364,78 @@ export component Canvas inherits Rectangle {
                 PinButton {
                     pinned: root.pinned;
                     toggled => { root.toggle-pin(); }
+                }
+            }
+
+            /* 标签行：已挂标签（可删） + 行内输入（Enter 提交、Esc 取消）。
+               Flexbox 自动换行，标签多时输入仍可到达。 */
+            FlexboxLayout {
+                spacing: Theme.space-2xs;
+                alignment: start;
+                cross-axis-alignment: start;
+
+                for tag in root.tags : TagChip {
+                    label: tag;
+                    removable: true;
+                    removed => { root.tag-removed(tag); }
+                }
+
+                tag-input-box := Rectangle {
+                    width: 160px;
+                    height: 24px;
+                    border-radius: Theme.radius-caption;
+                    background: Theme.control;
+                    clip: true;
+
+                    tag-input := TextInput {
+                        x: Theme.space-2xs;
+                        width: parent.width - 2 * Theme.space-2xs;
+                        height: parent.height;
+                        single-line: true;
+                        font-family: Theme.font-body;
+                        font-size: Theme.text-sm;
+                        color: Theme.ink;
+                        selection-background-color: Theme.selection;
+                        selection-foreground-color: Theme.ink;
+                        vertical-alignment: center;
+                        edited => { root.tag-edited(); }
+                        accepted => {
+                            root.tag-submitted(tag-input.text);
+                            tag-input.text = "";
+                        }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                tag-input.text = "";
+                                root.tag-edited();
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+
+                    Text {
+                        x: Theme.space-2xs;
+                        width: parent.width - 2 * Theme.space-2xs;
+                        height: parent.height;
+                        visible: tag-input.text == "" && tag-input.preedit-text == "";
+                        text: root.tag-error != "" ? root.tag-error : Strings.tag-add-placeholder;
+                        font-size: Theme.text-sm;
+                        color: Theme.ink-muted;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+
+                    /* 聚焦提示沿用既有输入约定：底部 accent 下划线，不用焦点环。 */
+                    Rectangle {
+                        x: Theme.radius-caption;
+                        y: parent.height - self.height;
+                        width: parent.width - 2 * Theme.radius-caption;
+                        height: 2px;
+                        border-radius: 1px;
+                        background: Theme.focus;
+                        opacity: tag-input.has-focus ? 1 : 0;
+                        animate opacity { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+                    }
                 }
             }
 

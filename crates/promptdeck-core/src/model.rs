@@ -51,6 +51,36 @@ pub struct ItemSummary {
     pub pinned: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    pub tags: Vec<Tag>,
+}
+
+/// A Tag attached to a Prompt, held as its canonical display name. Names are
+/// unique case-insensitively in storage, so a `Tag` may be matched with
+/// `eq_ignore_ascii_case` (mirroring SQLite `NOCASE`) or by exact value once it
+/// came from the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tag(String);
+
+impl Tag {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Tag {
+    fn from(name: &str) -> Self {
+        Self(name.to_string())
+    }
+}
+
+impl From<String> for Tag {
+    fn from(name: String) -> Self {
+        Self(name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

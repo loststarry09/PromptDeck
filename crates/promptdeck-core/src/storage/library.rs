@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::str::FromStr;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, named_params, params};
 
 use crate::clock::{Clock, SystemClock};
 use crate::error::{Error, Result};
 use crate::id::{IdSource, UuidV7Ids};
 use crate::model::{
-    Item, ItemKind, ItemSummary, Revision, VariableDef, content_hash, derive_title,
+    Item, ItemKind, ItemSummary, Revision, Tag, VariableDef, content_hash, derive_title,
 };
 use crate::search::{self, QueryPlan};
 use crate::variables;
@@ -21,6 +21,11 @@ const ITEM_COLUMNS: &str = "id, kind, title, body_md, pinned, created_at, update
 const SUMMARY_COLUMNS: &str = "i.id, i.kind, i.title, i.pinned, i.created_at, i.updated_at";
 const SUMMARY_ORDER: &str =
     "ORDER BY i.pinned DESC, i.updated_at DESC, i.created_at DESC, i.id DESC";
+/// Narrows a prompt query to Prompts carrying `:tag`, case-insensitively. A
+/// `NULL` `:tag` disables the filter, so the same SQL serves unfiltered search.
+const TAG_FILTER: &str = "AND (:tag IS NULL OR EXISTS (
+         SELECT 1 FROM item_tags it
+         WHERE it.item_id = i.id AND it.tag COLLATE NOCASE = :tag COLLATE NOCASE))";
 
 pub struct Library {
     conn: Connection,
@@ -194,35 +199,112 @@ impl Library {
         Ok(variables)
     }
 
-    pub fn list_prompts(&self) -> Result<Vec<ItemSummary>> {
-        let mut statement = self.conn.prepare(&format!(
-            "SELECT {SUMMARY_COLUMNS} FROM items i
-             WHERE i.kind = 'prompt' AND i.deleted_at IS NULL
-             {SUMMARY_ORDER}"
-        ))?;
-        to_summaries(statement.query_map([], summary_tuple)?)
+    /// The Tag names attached to an item, ordered case-insensitively.
+    pub fn tags(&self, id: &str) -> Result<Vec<Tag>> {
+        tags_for(&self.conn, id)
     }
 
-    pub fn search_prompts(&self, query: &str) -> Result<Vec<ItemSummary>> {
+    /// Attaches a Tag to a Prompt and returns its canonical stored name. Names
+    /// are trimmed and unique case-insensitively: `Work` and `work` are the
+    /// same Tag, and attaching an existing one is a no-op. Blank names are
+    /// rejected. Tagging does not touch `updated_at` (it is orthogonal to
+    /// recency, like pinning).
+    pub fn add_tag(&self, id: &str, name: &str) -> Result<Tag> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::InvalidTag(name.to_string()));
+        }
+
+        let transaction = self.conn.unchecked_transaction()?;
+        if load_item(&transaction, id)?.is_none() {
+            return Err(Error::ItemNotFound(id.to_string()));
+        }
+
+        let canonical: Option<String> = transaction
+            .query_row(
+                "SELECT name FROM tags WHERE name = ?1 COLLATE NOCASE",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let canonical = match canonical {
+            Some(existing) => existing,
+            None => {
+                transaction.execute("INSERT INTO tags (name) VALUES (?1)", [name])?;
+                name.to_string()
+            }
+        };
+
+        transaction.execute(
+            "INSERT OR IGNORE INTO item_tags (item_id, tag) VALUES (?1, ?2)",
+            params![id, canonical],
+        )?;
+        transaction.commit()?;
+        Ok(canonical.into())
+    }
+
+    /// Detaches a Tag from a Prompt. Matching is case-insensitive and removing
+    /// an absent Tag is a no-op. Tags left attached to no Prompt are pruned.
+    pub fn remove_tag(&self, id: &str, name: &str) -> Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
+        if load_item(&transaction, id)?.is_none() {
+            return Err(Error::ItemNotFound(id.to_string()));
+        }
+
+        transaction.execute(
+            "DELETE FROM item_tags WHERE item_id = ?1 AND tag COLLATE NOCASE = ?2 COLLATE NOCASE",
+            params![id, name],
+        )?;
+        prune_unused_tags(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn list_prompts(&self) -> Result<Vec<ItemSummary>> {
+        self.search_prompts("", None)
+    }
+
+    /// Searches Prompts by title/body text, optionally narrowed to a Tag. The
+    /// text and Tag filters stack, and both paths keep pinned-first ordering.
+    pub fn search_prompts(&self, query: &str, tag: Option<&str>) -> Result<Vec<ItemSummary>> {
         match search::plan(query) {
-            QueryPlan::All => self.list_prompts(),
+            QueryPlan::All => {
+                let mut statement = self.conn.prepare(&format!(
+                    "SELECT {SUMMARY_COLUMNS} FROM items i
+                     WHERE i.kind = 'prompt' AND i.deleted_at IS NULL
+                     {TAG_FILTER}
+                     {SUMMARY_ORDER}"
+                ))?;
+                let rows = statement.query_map(named_params! { ":tag": tag }, summary_tuple)?;
+                to_summaries(&self.conn, rows)
+            }
             QueryPlan::Trigram(expression) => {
                 let mut statement = self.conn.prepare(&format!(
                     "SELECT {SUMMARY_COLUMNS} FROM items_fts JOIN items i ON i.id = items_fts.item_id
-                     WHERE items_fts MATCH ?1 AND i.kind = 'prompt' AND i.deleted_at IS NULL
+                     WHERE items_fts MATCH :expr AND i.kind = 'prompt' AND i.deleted_at IS NULL
+                     {TAG_FILTER}
                      {SUMMARY_ORDER}"
                 ))?;
-                to_summaries(statement.query_map([expression], summary_tuple)?)
+                let rows = statement.query_map(
+                    named_params! { ":expr": expression, ":tag": tag },
+                    summary_tuple,
+                )?;
+                to_summaries(&self.conn, rows)
             }
             QueryPlan::Like(pattern) => {
                 // Keep the LIKE columns in sync with the indexed columns above.
                 let mut statement = self.conn.prepare(&format!(
                     "SELECT {SUMMARY_COLUMNS} FROM items i
                      WHERE i.kind = 'prompt' AND i.deleted_at IS NULL
-                       AND (i.title LIKE ?1 ESCAPE '\\' OR i.body_md LIKE ?1 ESCAPE '\\')
+                       AND (i.title LIKE :pattern ESCAPE '\\' OR i.body_md LIKE :pattern ESCAPE '\\')
+                     {TAG_FILTER}
                      {SUMMARY_ORDER}"
                 ))?;
-                to_summaries(statement.query_map([pattern], summary_tuple)?)
+                let rows = statement.query_map(
+                    named_params! { ":pattern": pattern, ":tag": tag },
+                    summary_tuple,
+                )?;
+                to_summaries(&self.conn, rows)
             }
         }
     }
@@ -246,6 +328,8 @@ impl Library {
 
         remove_fts(&transaction, id)?;
         remove_variables(&transaction, id)?;
+        remove_item_tags(&transaction, id)?;
+        prune_unused_tags(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -369,11 +453,13 @@ fn summary_tuple(row: &rusqlite::Row<'_>) -> rusqlite::Result<SummaryTuple> {
 }
 
 fn to_summaries(
+    conn: &Connection,
     rows: impl Iterator<Item = rusqlite::Result<SummaryTuple>>,
 ) -> Result<Vec<ItemSummary>> {
     let mut summaries = Vec::new();
     for row in rows {
         let (id, kind, title, pinned, created_at, updated_at) = row?;
+        let tags = tags_for(conn, &id)?;
         summaries.push(ItemSummary {
             id,
             kind: ItemKind::from_str(&kind)?,
@@ -381,9 +467,23 @@ fn to_summaries(
             pinned,
             created_at,
             updated_at,
+            tags,
         });
     }
     Ok(summaries)
+}
+
+/// The Tag names attached to an item, ordered case-insensitively.
+fn tags_for(conn: &Connection, id: &str) -> Result<Vec<Tag>> {
+    let mut statement = conn
+        .prepare("SELECT tag FROM item_tags WHERE item_id = ?1 ORDER BY tag COLLATE NOCASE, tag")?;
+    let rows = statement.query_map([id], |row| row.get::<_, String>(0))?;
+
+    let mut tags = Vec::new();
+    for row in rows {
+        tags.push(Tag::from(row?));
+    }
+    Ok(tags)
 }
 
 fn item_rowid(conn: &Connection, id: &str) -> Result<Option<i64>> {
@@ -424,6 +524,22 @@ fn sync_variables(conn: &Connection, id: &str, body_md: &str) -> Result<()> {
 
 fn remove_variables(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM variables WHERE item_id = ?1", [id])?;
+    Ok(())
+}
+
+fn remove_item_tags(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM item_tags WHERE item_id = ?1", [id])?;
+    Ok(())
+}
+
+/// Drops Tag vocabulary entries that no Prompt references, so a soft-deleted
+/// or re-tagged Prompt leaves no orphan rows behind.
+fn prune_unused_tags(conn: &Connection) -> Result<()> {
+    conn.execute(
+        "DELETE FROM tags
+         WHERE NOT EXISTS (SELECT 1 FROM item_tags it WHERE it.tag = tags.name)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -692,7 +808,7 @@ mod tests {
             .expect("save new");
 
         assert_eq!(
-            summary_ids(&library.search_prompts("翻译").expect("search like")),
+            summary_ids(&library.search_prompts("翻译", None).expect("search like")),
             vec![new.id.clone(), old.id.clone()]
         );
 
@@ -700,7 +816,7 @@ mod tests {
 
         for query in ["翻译", "翻译成"] {
             assert_eq!(
-                summary_ids(&library.search_prompts(query).expect("search")),
+                summary_ids(&library.search_prompts(query, None).expect("search")),
                 vec![old.id.clone(), new.id.clone()],
                 "query {query:?} should put the pinned Prompt first"
             );
@@ -715,7 +831,7 @@ mod tests {
             .save(&item.id, "", "请把这段话翻译成英文")
             .expect("save");
 
-        let hits = library.search_prompts("翻译成").expect("search");
+        let hits = library.search_prompts("翻译成", None).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, item.id);
     }
@@ -732,11 +848,11 @@ mod tests {
             .save(&latin.id, "", "使用 AI 助手整理周报")
             .expect("save latin");
 
-        let short_cjk = library.search_prompts("翻译").expect("search 翻译");
+        let short_cjk = library.search_prompts("翻译", None).expect("search 翻译");
         assert_eq!(short_cjk.len(), 1);
         assert_eq!(short_cjk[0].id, cjk.id);
 
-        let short_latin = library.search_prompts("AI").expect("search AI");
+        let short_latin = library.search_prompts("AI", None).expect("search AI");
         assert_eq!(short_latin.len(), 1);
         assert_eq!(short_latin[0].id, latin.id);
     }
@@ -750,7 +866,7 @@ mod tests {
             .expect("save");
 
         for query in ["hello world", "HELLO", "he", "world prompt"] {
-            let hits = library.search_prompts(query).expect("search");
+            let hits = library.search_prompts(query, None).expect("search");
             assert_eq!(hits.len(), 1, "query {query:?} should match");
             assert_eq!(hits[0].id, item.id);
         }
@@ -773,13 +889,19 @@ mod tests {
             .save(&body_item.id, "无关标题", "这里包含正文短语")
             .expect("save body item");
 
-        let hits = library.search_prompts("模板标题").expect("search title");
+        let hits = library
+            .search_prompts("模板标题", None)
+            .expect("search title");
         assert_eq!(summary_ids(&hits), vec![title_item.id.clone()]);
 
-        let hits = library.search_prompts("正文短语").expect("search body");
+        let hits = library
+            .search_prompts("正文短语", None)
+            .expect("search body");
         assert_eq!(summary_ids(&hits), vec![body_item.id.clone()]);
 
-        let hits = library.search_prompts("模板").expect("search short title");
+        let hits = library
+            .search_prompts("模板", None)
+            .expect("search short title");
         assert_eq!(summary_ids(&hits), vec![title_item.id.clone()]);
     }
 
@@ -788,13 +910,24 @@ mod tests {
         let (library, clock, _ids) = library();
         let item = library.create_prompt().expect("create");
         library.save(&item.id, "", "alpha content").expect("save");
-        assert_eq!(library.search_prompts("alpha").expect("search").len(), 1);
+        assert_eq!(
+            library.search_prompts("alpha", None).expect("search").len(),
+            1
+        );
 
         clock.advance(REVISION_WINDOW_MS);
         library.save(&item.id, "", "beta content").expect("save");
 
-        assert!(library.search_prompts("alpha").expect("search").is_empty());
-        assert_eq!(library.search_prompts("beta").expect("search").len(), 1);
+        assert!(
+            library
+                .search_prompts("alpha", None)
+                .expect("search")
+                .is_empty()
+        );
+        assert_eq!(
+            library.search_prompts("beta", None).expect("search").len(),
+            1
+        );
     }
 
     #[test]
@@ -811,7 +944,7 @@ mod tests {
 
         for query in ["翻译", "翻译成"] {
             assert_eq!(
-                library.search_prompts(query).expect("search").len(),
+                library.search_prompts(query, None).expect("search").len(),
                 2,
                 "query {query:?} should match both items before deletion"
             );
@@ -820,10 +953,15 @@ mod tests {
         library.soft_delete(&removed.id).expect("delete");
 
         for query in ["翻译", "翻译成"] {
-            let hits = library.search_prompts(query).expect("search");
+            let hits = library.search_prompts(query, None).expect("search");
             assert_eq!(summary_ids(&hits), vec![kept.id.clone()], "query {query:?}");
         }
-        assert!(library.search_prompts("成法文").expect("search").is_empty());
+        assert!(
+            library
+                .search_prompts("成法文", None)
+                .expect("search")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -838,7 +976,7 @@ mod tests {
             .save(&second.id, "second", "two")
             .expect("save second");
 
-        let hits = library.search_prompts("  ").expect("search");
+        let hits = library.search_prompts("  ", None).expect("search");
         assert_eq!(summary_ids(&hits), vec![second.id, first.id]);
     }
 
@@ -858,15 +996,19 @@ mod tests {
             .save(&quoted.id, "", "say \"hi\" now")
             .expect("save quoted");
 
-        let hits = library.search_prompts("%").expect("search percent");
+        let hits = library.search_prompts("%", None).expect("search percent");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, percent.id);
 
-        let hits = library.search_prompts("_").expect("search underscore");
+        let hits = library
+            .search_prompts("_", None)
+            .expect("search underscore");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, underscore.id);
 
-        let hits = library.search_prompts("\"hi\"").expect("search quoted");
+        let hits = library
+            .search_prompts("\"hi\"", None)
+            .expect("search quoted");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, quoted.id);
     }
@@ -885,7 +1027,7 @@ mod tests {
         let library =
             Library::from_connection(conn, TestClock::new(T0), TestIds::new()).expect("library");
 
-        let hits = library.search_prompts("翻译成").expect("search");
+        let hits = library.search_prompts("翻译成", None).expect("search");
         assert_eq!(summary_ids(&hits), vec!["legacy"]);
     }
 
@@ -915,7 +1057,7 @@ mod tests {
         let library =
             Library::from_connection(conn, TestClock::new(T0), TestIds::new()).expect("library");
 
-        let hits = library.search_prompts("翻译成").expect("search");
+        let hits = library.search_prompts("翻译成", None).expect("search");
         assert_eq!(summary_ids(&hits).len(), 2);
     }
 
@@ -1164,6 +1306,233 @@ mod tests {
             vec!["item-0001".to_string(), "item-0002".to_string()]
         );
         assert!(listed[0].pinned);
+        drop(reopened);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    fn tag(name: &str) -> Tag {
+        Tag::new(name)
+    }
+
+    #[test]
+    fn add_tag_is_case_insensitive_unique_and_roundtrips() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+
+        assert_eq!(
+            library.add_tag(&item.id, "  Work  ").expect("add").as_str(),
+            "Work"
+        );
+        assert_eq!(
+            library.add_tag(&item.id, "work").expect("dup").as_str(),
+            "Work"
+        );
+        assert_eq!(library.tags(&item.id).expect("tags"), vec![tag("Work")]);
+        assert_eq!(
+            library
+                .load(&item.id)
+                .expect("load")
+                .expect("item")
+                .updated_at,
+            T0,
+            "tagging is orthogonal to recency"
+        );
+    }
+
+    #[test]
+    fn add_tag_rejects_blank_names_and_unknown_items() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+
+        assert!(library.add_tag(&item.id, "   ").is_err());
+        assert!(library.add_tag("missing", "work").is_err());
+
+        library.soft_delete(&item.id).expect("delete");
+        assert!(library.add_tag(&item.id, "work").is_err());
+    }
+
+    #[test]
+    fn tags_are_listed_case_insensitively_sorted() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        for tag in ["beta", "Work", "alpha"] {
+            library.add_tag(&item.id, tag).expect("add");
+        }
+
+        assert_eq!(
+            library.tags(&item.id).expect("tags"),
+            vec![tag("alpha"), tag("beta"), tag("Work")]
+        );
+    }
+
+    #[test]
+    fn remove_tag_detaches_case_insensitively_and_is_idempotent() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        library.add_tag(&item.id, "Work").expect("add");
+        library.add_tag(&item.id, "beta").expect("add");
+
+        library.remove_tag(&item.id, "work").expect("remove");
+        assert_eq!(library.tags(&item.id).expect("tags"), vec![tag("beta")]);
+
+        library.remove_tag(&item.id, "work").expect("remove again");
+        assert_eq!(library.tags(&item.id).expect("tags"), vec![tag("beta")]);
+    }
+
+    #[test]
+    fn search_with_a_tag_keeps_only_tagged_prompts_in_order() {
+        let (library, clock, _ids) = library();
+        let tagged_old = library.create_prompt().expect("create");
+        library.add_tag(&tagged_old.id, "work").expect("tag");
+        clock.advance(1_000);
+        let untagged = library.create_prompt().expect("create");
+        clock.advance(1_000);
+        let tagged_new = library.create_prompt().expect("create");
+        library.add_tag(&tagged_new.id, "work").expect("tag");
+
+        assert_eq!(
+            summary_ids(&library.search_prompts("", Some("work")).expect("filter")),
+            vec![tagged_new.id.clone(), tagged_old.id.clone()]
+        );
+        assert_eq!(library.search_prompts("", None).expect("all").len(), 3);
+        assert!(untagged.id != tagged_old.id);
+    }
+
+    #[test]
+    fn tag_filter_is_case_insensitive_and_keeps_pinned_first() {
+        let (library, clock, _ids) = library();
+        let older = library.create_prompt().expect("create");
+        library.save(&older.id, "", "alpha body").expect("save");
+        library.add_tag(&older.id, "Work").expect("tag");
+        clock.advance(1_000);
+        let newer = library.create_prompt().expect("create");
+        library.save(&newer.id, "", "alpha body two").expect("save");
+        library.add_tag(&newer.id, "work").expect("tag");
+
+        assert_eq!(
+            summary_ids(
+                &library
+                    .search_prompts("alpha", Some("WORK"))
+                    .expect("filter")
+            ),
+            vec![newer.id.clone(), older.id.clone()]
+        );
+
+        library.set_pinned(&older.id, true).expect("pin");
+        assert_eq!(
+            summary_ids(
+                &library
+                    .search_prompts("alpha", Some("work"))
+                    .expect("filter")
+            ),
+            vec![older.id.clone(), newer.id.clone()]
+        );
+    }
+
+    #[test]
+    fn tag_filter_combines_with_search_text_on_both_query_paths() {
+        let (library, clock, _ids) = library();
+        let match_item = library.create_prompt().expect("create");
+        library
+            .save(&match_item.id, "", "请把这段话翻译成英文")
+            .expect("save");
+        library.add_tag(&match_item.id, "work").expect("tag");
+        clock.advance(1_000);
+        let other_tag = library.create_prompt().expect("create");
+        library
+            .save(&other_tag.id, "", "请把这段话翻译成法文")
+            .expect("save");
+        library.add_tag(&other_tag.id, "personal").expect("tag");
+        clock.advance(1_000);
+        let other_text = library.create_prompt().expect("create");
+        library.save(&other_text.id, "", "整理周报").expect("save");
+        library.add_tag(&other_text.id, "work").expect("tag");
+
+        // "翻译" is short → LIKE path; "翻译成" is 3 chars → FTS path.
+        for query in ["翻译", "翻译成"] {
+            assert_eq!(
+                summary_ids(&library.search_prompts(query, Some("work")).expect("filter")),
+                vec![match_item.id.clone()],
+                "query {query:?} with tag filter"
+            );
+        }
+    }
+
+    #[test]
+    fn soft_delete_cascades_tag_links_and_prunes_unused_tags() {
+        let (library, _clock, _ids) = library();
+        let item = library.create_prompt().expect("create");
+        library.add_tag(&item.id, "work").expect("tag");
+        library.add_tag(&item.id, "shared").expect("tag");
+        let survivor = library.create_prompt().expect("create");
+        library.add_tag(&survivor.id, "shared").expect("tag");
+
+        library.soft_delete(&item.id).expect("delete");
+
+        let links: i64 = library
+            .conn
+            .query_row("SELECT COUNT(*) FROM item_tags", [], |row| row.get(0))
+            .expect("count links");
+        assert_eq!(links, 1, "only the surviving Prompt keeps its link");
+        let orphan: i64 = library
+            .conn
+            .query_row("SELECT COUNT(*) FROM tags WHERE name = 'work'", [], |row| {
+                row.get(0)
+            })
+            .expect("count orphan tag");
+        assert_eq!(orphan, 0, "unused tag vocabulary is pruned");
+
+        assert!(
+            library
+                .search_prompts("", Some("work"))
+                .expect("filter")
+                .is_empty()
+        );
+        assert_eq!(
+            summary_ids(&library.search_prompts("", Some("shared")).expect("filter")),
+            vec![survivor.id.clone()]
+        );
+    }
+
+    #[test]
+    fn tag_links_and_filter_survive_reopening_the_database() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "promptdeck-tags-{}-{stamp}.sqlite3",
+            std::process::id()
+        ));
+
+        let clock = TestClock::new(T0);
+        let ids = TestIds::new();
+        let item_id;
+        {
+            let library = Library::open_with(&path, clock.clone(), ids.clone()).expect("open");
+            let item = library.create_prompt().expect("create");
+            item_id = item.id.clone();
+            library.add_tag(&item.id, "Work").expect("tag");
+        }
+
+        let reopened = Library::open_with(&path, clock, ids).expect("reopen");
+        assert_eq!(reopened.tags(&item_id).expect("tags"), vec![tag("Work")]);
+        assert_eq!(
+            summary_ids(&reopened.search_prompts("", Some("work")).expect("filter")),
+            vec![item_id.clone()]
+        );
+        assert_eq!(
+            reopened
+                .list_prompts()
+                .expect("list")
+                .first()
+                .expect("row")
+                .tags,
+            vec![tag("Work")]
+        );
         drop(reopened);
 
         let _ = std::fs::remove_file(&path);

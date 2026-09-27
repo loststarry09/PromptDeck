@@ -1,0 +1,82 @@
+/* Hallmark · component: tag-chip · genre: modern-minimal
+ * theme: studied-DNA (BlockHelm Workbench, design/design.md locked)
+ * source: design/design.md semantic tokens via ui/theme.slint
+ * states: default · hover · active · selected
+ * 焦点：遵循 2026-09-26 产品决策，非输入元素不提供聚焦高亮（键盘 Tab 无可见指示）。
+ */
+
+import { Theme } from "theme.slint";
+import { AppIcon } from "icons.slint";
+
+export component TagChip inherits FocusScope {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> removable: false;
+    callback clicked();
+    callback removed();
+
+    height: 22px;
+    focus-on-click: false;
+    min-width: 28px;
+    max-width: 160px;
+
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == Key.Space) {
+            root.clicked();
+            return accept;
+        }
+        if (root.removable && (event.text == Key.Backspace || event.text == Key.Delete)) {
+            root.removed();
+            return accept;
+        }
+        return reject;
+    }
+
+    pill := Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: Theme.radius-caption;
+        background: body.pressed || body.has-hover ? Theme.control-hover : Theme.control;
+        border-width: 2px;
+        border-color: root.selected ? Theme.accent : transparent;
+        animate background, border-color { duration: Theme.dur-fast; easing: cubic-bezier(0.16, 1, 0.3, 1); }
+    }
+
+    body := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.space-2xs;
+        padding-right: root.removable ? Theme.space-3xs : Theme.space-2xs;
+        spacing: Theme.space-3xs;
+
+        Text {
+            text: root.label;
+            font-size: Theme.text-xs;
+            font-weight: root.selected ? 600 : 400;
+            color: root.selected ? Theme.ink : Theme.ink-2;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        if root.removable : remove-hit := TouchArea {
+            width: 16px;
+            height: 100%;
+            mouse-cursor: pointer;
+
+            AppIcon {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                source: @image-url("icons/close.svg");
+                icon-size: 9px;
+                tint: remove-hit.has-hover ? Theme.ink : Theme.ink-muted;
+            }
+
+            clicked => { root.removed(); }
+        }
+    }
+}

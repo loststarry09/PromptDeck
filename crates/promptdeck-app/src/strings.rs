@@ -30,6 +30,13 @@ pub const EMPTY_SEARCH_HINT: &str = "换个关键词，或清空搜索查看全�
 pub const COPY_DONE: &str = "已复制";
 pub const PIN: &str = "置顶";
 pub const PINNED: &str = "已置顶";
+pub const TAG_ADD_PLACEHOLDER: &str = "添加标签…";
+pub const TAG_FILTER_PREFIX: &str = "标签";
+pub const TAG_FILTER_CLEAR: &str = "清除";
+pub const TAG_EMPTY_TITLE: &str = "该标签下暂无提示词";
+pub const TAG_EMPTY_HINT: &str = "换个标签，或清除筛选查看全部";
+pub const TAG_EMPTY_ERROR: &str = "标签不能为空";
+pub const TAG_DUPLICATE_ERROR: &str = "标签已存在";
 
 pub fn install(ui: &AppWindow) {
     let strings = ui.global::<Strings>();
@@ -59,6 +66,11 @@ pub fn install(ui: &AppWindow) {
     strings.set_copy_done(COPY_DONE.into());
     strings.set_pin(PIN.into());
     strings.set_pinned(PINNED.into());
+    strings.set_tag_add_placeholder(TAG_ADD_PLACEHOLDER.into());
+    strings.set_tag_filter_prefix(TAG_FILTER_PREFIX.into());
+    strings.set_tag_filter_clear(TAG_FILTER_CLEAR.into());
+    strings.set_tag_empty_title(TAG_EMPTY_TITLE.into());
+    strings.set_tag_empty_hint(TAG_EMPTY_HINT.into());
 }
 
 pub fn empty_search_title(query: &str) -> String {
